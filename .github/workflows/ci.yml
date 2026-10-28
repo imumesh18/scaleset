@@ -27,7 +27,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets
+      - run: cargo clippy --all-targets --all-features
       - run: cargo clippy --all-targets --no-default-features --features native-tls
 
   test:
@@ -59,3 +59,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --lib
+      - run: cargo check --lib --features testing

@@ -117,6 +117,8 @@
 //!
 //! * `rustls` (default): TLS through rustls.
 //! * `native-tls`: TLS through the platform's library.
+//! * `testing`: [`testing::Emulator`], a stateful emulator of the scale set
+//!   APIs for tests, and the `scaleset-emulator` binary.
 
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -128,6 +130,9 @@ mod error;
 pub mod listener;
 mod retry;
 mod session;
+#[cfg(feature = "testing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub mod testing;
 mod transport;
 mod types;
 

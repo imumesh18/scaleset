@@ -16,6 +16,9 @@ default = ["rustls"]
 rustls = ["reqwest/rustls"]
 ## Use the platform's native TLS stack.
 native-tls = ["reqwest/native-tls"]
+## A stateful in-process emulator of the scale set APIs, for tests
+## (`scaleset::testing`), and the `scaleset-emulator` binary.
+testing = ["dep:axum", "tokio/net", "tokio/rt", "tokio/signal"]
 
 [dependencies]
 aws-lc-rs = { version = "1.13", default-features = false, features = ["aws-lc-sys", "alloc"] }
@@ -33,11 +36,18 @@ tracing = "0.1"
 url = "2.5"
 uuid = { version = "1", features = ["serde"] }
 
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "json", "query", "tokio"] }
+
 [dev-dependencies]
+scaleset = { path = ".", features = ["testing"] }
 anyhow = "1"
 tokio = { version = "1.38", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wiremock = "0.6"
+
+[[bin]]
+name = "scaleset-emulator"
+required-features = ["testing"]
 
 [package.metadata.docs.rs]
 all-features = true

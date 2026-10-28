@@ -69,11 +69,9 @@ impl MessageSession {
             owner_name: owner,
         })?;
         let path = format!("/{SCALE_SET_ENDPOINT}/{scale_set_id}/sessions");
-        let req = client
-            .actions_request(Method::POST, &path, &[], Some(body))
-            .await?;
+
         let info: SessionInfo = client
-            .send(req, client.retry_policy())
+            .actions(Method::POST, &path, &[], Some(body), client.retry_policy())
             .await?
             .expect(StatusCode::OK)?
             .json()?;
@@ -251,14 +249,16 @@ impl MessageSession {
             "/{SCALE_SET_ENDPOINT}/{}/sessions/{}",
             self.inner.scale_set_id, info.session_id
         );
-        let req = self
-            .inner
-            .client
-            .actions_request(Method::DELETE, &path, &[], None)
-            .await?;
+
         self.inner
             .client
-            .send(req, self.inner.client.retry_policy())
+            .actions(
+                Method::DELETE,
+                &path,
+                &[],
+                None,
+                self.inner.client.retry_policy(),
+            )
             .await?
             .expect(StatusCode::NO_CONTENT)?;
         Ok(())
@@ -296,15 +296,17 @@ impl MessageSession {
             "/{SCALE_SET_ENDPOINT}/{}/sessions/{}",
             self.inner.scale_set_id, current.session_id
         );
-        let req = self
-            .inner
-            .client
-            .actions_request(Method::PATCH, &path, &[], None)
-            .await?;
+
         let refreshed: SessionInfo = self
             .inner
             .client
-            .send(req, self.inner.client.retry_policy())
+            .actions(
+                Method::PATCH,
+                &path,
+                &[],
+                None,
+                self.inner.client.retry_policy(),
+            )
             .await?
             .expect(StatusCode::OK)?
             .json()?;

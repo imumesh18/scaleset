@@ -131,6 +131,56 @@ The `listener` module runs this loop for you: it hands your `Scaler` the
 initial statistics, then each message (or `Event::Idle`), and acknowledges a
 message only after `scale` succeeds.
 
+## Testing your autoscaler
+
+The `testing` feature adds `scaleset::testing::Emulator`, an in-process,
+stateful emulator of GitHub and the Actions service. It is not a mock that
+replays canned responses. It keeps scale sets, sessions, runners and jobs,
+computes statistics from them, redelivers messages until they are
+acknowledged, and lets a test drive the job lifecycle or inject failures.
+
+```toml
+[dev-dependencies]
+scaleset = { version = "0.1", features = ["testing"] }
+```
+
+```rust,no_run
+use std::time::Duration;
+use scaleset::RunnerScaleSetSpec;
+use scaleset::testing::{Emulator, Endpoint, Fault, JobState};
+
+#[tokio::test]
+async fn my_autoscaler_runs_jobs() {
+    let emu = Emulator::builder()
+        .long_poll(Duration::from_millis(100))      // don't wait 50 s on idle polls
+        .auto_run_jobs(Duration::from_millis(50))   // play the runners
+        .start()
+        .await;
+    let client = emu.client();
+
+    let spec = RunnerScaleSetSpec::new("linux");
+    let id = client.create_runner_scale_set(&spec).await.unwrap().id;
+    // ... start your autoscaler with `client` ...
+
+    emu.inject(Fault::status(Endpoint::GetMessage, 503).times(2)); // a flaky service
+    emu.queue_job(id, ["linux"]);
+
+    emu.wait_until(Duration::from_secs(10), |s| {
+        s.jobs.iter().all(|j| j.state == JobState::Completed) && s.runners.is_empty()
+    })
+    .await;
+}
+```
+
+Tests can also expire the queue or admin token, check statistics, and
+inspect every request served. The `scaleset-emulator` binary serves the same
+emulator with a JSON control API, so clients in other languages, including
+GitHub's Go client, can run against it:
+
+```sh
+cargo run --features testing --bin scaleset-emulator -- --port 4100 --long-poll-ms 2000
+```
+
 ## Authentication
 
 1. **GitHub App** (recommended): `Credentials::github_app(client_id,

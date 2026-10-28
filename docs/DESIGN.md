@@ -339,12 +339,48 @@ Same JSON user agent as Go (`system`, `version`, `commit_sha`,
 | `thiserror` | error types |
 | `tracing` | logs |
 | `httpdate`, `fastrand` | `Retry-After` dates, backoff jitter |
+| `axum` (only with `testing`) | the emulator's HTTP server |
 
 ## 5. Testing
 
-* Unit tests for URL parsing, rate-limit classification, `Retry-After`
-  parsing, backoff, JWT assembly and message decoding.
-* Integration tests against `wiremock` cover the full token exchange
-  (PAT and GitHub App), CRUD calls, error mapping, retries, rate limits, the
-  `max_elapsed` budget, and session refresh on 401.
-* Listener tests use an in-memory `MessageSource`.
+Two kinds of test, each with the tool that suits it:
+
+* **Wire tests** (`tests/client.rs`, `tests/session.rs`) use `wiremock`.
+  They pin exact bytes: headers, query strings, bodies, status sequences
+  (401 then 200), `Retry-After`, delays and a byte order mark. These guard
+  the protocol contract.
+* **Behavior tests** (`tests/emulator.rs`) use `scaleset::testing::Emulator`,
+  a stateful emulator shipped behind the `testing` feature. They run whole
+  scenarios: an autoscaler draining a queue, redelivery after a crash, token
+  expiry, session conflicts, busy runners, injected faults.
+
+Unit tests cover URL parsing, rate-limit classification, `Retry-After`,
+backoff, JWT signing and message decoding.
+
+### Why our own emulator
+
+[`vercel-labs/emulate`](https://github.com/vercel-labs/emulate) has the
+right idea (stateful emulation, not mocks) but emulates GitHub's public
+REST API only. It has none of the runner registration endpoints and none of
+the Actions service APIs, which are most of this crate's surface, and would
+add Node to `cargo test`. A Rust emulator in this crate:
+
+* shares the crate's types, so it cannot drift from the client;
+* ships with the crate, so users can test their own autoscalers;
+* compiles only with the `testing` feature, so production builds carry no
+  server dependency (`axum`);
+* runs standalone (`scaleset-emulator`, with a JSON control API under
+  `/_emulator`), so GitHub's Go client can run the same scenarios, which
+  makes it a reference to compare both clients against.
+
+The emulator models the protocol as this crate and the Go client understand
+it. Where the real service is undocumented (exception names for conflicts,
+when acquired jobs are assigned), it makes a documented choice; see the
+`testing` module docs.
+
+### What the emulator found
+
+The first scenario run exposed a gap shared with the Go client: an admin
+token rejected before its expiry (revoked, or clock skew) failed every call
+until it expired. The client now drops the token and retries once with a
+fresh one.

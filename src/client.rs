@@ -359,8 +359,8 @@ impl Client {
         runner_group_id: RunnerGroupId,
         name: &str,
     ) -> Result<Option<RunnerScaleSet>> {
-        let req = self
-            .actions_request(
+        let list: ListResponse<RunnerScaleSet> = self
+            .actions(
                 Method::GET,
                 SCALE_SET_ENDPOINT,
                 &[
@@ -368,10 +368,8 @@ impl Client {
                     ("name", name.to_owned()),
                 ],
                 None,
+                &self.retry,
             )
-            .await?;
-        let list: ListResponse<RunnerScaleSet> = self
-            .send(req, &self.retry)
             .await?
             .expect(StatusCode::OK)?
             .json()?;
@@ -385,16 +383,14 @@ impl Client {
         &self,
         runner_group_id: RunnerGroupId,
     ) -> Result<Vec<RunnerScaleSet>> {
-        let req = self
-            .actions_request(
+        let list: ListResponse<RunnerScaleSet> = self
+            .actions(
                 Method::GET,
                 SCALE_SET_ENDPOINT,
                 &[("runnerGroupId", runner_group_id.to_string())],
                 None,
+                &self.retry,
             )
-            .await?;
-        let list: ListResponse<RunnerScaleSet> = self
-            .send(req, &self.retry)
             .await?
             .expect(StatusCode::OK)?
             .json()?;
@@ -404,8 +400,8 @@ impl Client {
     /// Gets a scale set by ID.
     pub async fn get_runner_scale_set_by_id(&self, id: ScaleSetId) -> Result<RunnerScaleSet> {
         let path = format!("/{SCALE_SET_ENDPOINT}/{id}");
-        let req = self.actions_request(Method::GET, &path, &[], None).await?;
-        self.send(req, &self.retry)
+
+        self.actions(Method::GET, &path, &[], None, &self.retry)
             .await?
             .expect(StatusCode::OK)?
             .json()
@@ -421,13 +417,17 @@ impl Client {
     ) -> Result<RunnerScaleSet> {
         let spec = spec.normalized(true).map_err(Error::InvalidInput)?;
         let body = to_json(&spec)?;
-        let req = self
-            .actions_request(Method::POST, SCALE_SET_ENDPOINT, &[], Some(body))
-            .await?;
-        self.send(req, &self.retry)
-            .await?
-            .expect(StatusCode::OK)?
-            .json()
+
+        self.actions(
+            Method::POST,
+            SCALE_SET_ENDPOINT,
+            &[],
+            Some(body),
+            &self.retry,
+        )
+        .await?
+        .expect(StatusCode::OK)?
+        .json()
     }
 
     /// Updates a scale set. Fields left `None` or empty in `spec` are not
@@ -440,10 +440,8 @@ impl Client {
         let spec = spec.normalized(false).map_err(Error::InvalidInput)?;
         let body = to_json(&spec)?;
         let path = format!("{SCALE_SET_ENDPOINT}/{id}");
-        let req = self
-            .actions_request(Method::PATCH, &path, &[], Some(body))
-            .await?;
-        self.send(req, &self.retry)
+
+        self.actions(Method::PATCH, &path, &[], Some(body), &self.retry)
             .await?
             .expect(StatusCode::OK)?
             .json()
@@ -452,10 +450,8 @@ impl Client {
     /// Deletes a scale set.
     pub async fn delete_runner_scale_set(&self, id: ScaleSetId) -> Result<()> {
         let path = format!("/{SCALE_SET_ENDPOINT}/{id}");
-        let req = self
-            .actions_request(Method::DELETE, &path, &[], None)
-            .await?;
-        self.send(req, &self.retry)
+
+        self.actions(Method::DELETE, &path, &[], None, &self.retry)
             .await?
             .expect(StatusCode::NO_CONTENT)?;
         Ok(())
@@ -463,16 +459,14 @@ impl Client {
 
     /// Finds a runner group by name.
     pub async fn get_runner_group_by_name(&self, name: &str) -> Result<Option<RunnerGroup>> {
-        let req = self
-            .actions_request(
+        let list: ListResponse<RunnerGroup> = self
+            .actions(
                 Method::GET,
                 RUNNER_GROUP_ENDPOINT,
                 &[("groupName", name.to_owned())],
                 None,
+                &self.retry,
             )
-            .await?;
-        let list: ListResponse<RunnerGroup> = self
-            .send(req, &self.retry)
             .await?
             .expect(StatusCode::OK)?
             .json()?;
@@ -492,21 +486,25 @@ impl Client {
         setting: &JitRunnerSetting,
     ) -> Result<JitRunnerConfig> {
         let path = format!("/{SCALE_SET_ENDPOINT}/{scale_set_id}/generatejitconfig");
-        let req = self
-            .actions_request(Method::POST, &path, &[], Some(to_json(setting)?))
-            .await?;
-        self.send(req, &self.retry)
-            .await?
-            .expect(StatusCode::OK)?
-            .json()
+
+        self.actions(
+            Method::POST,
+            &path,
+            &[],
+            Some(to_json(setting)?),
+            &self.retry,
+        )
+        .await?
+        .expect(StatusCode::OK)?
+        .json()
     }
 
     /// Gets a runner by ID. A missing runner is an error for which
     /// [`Error::is_not_found`] or [`Error::is_runner_not_found`] holds.
     pub async fn get_runner(&self, id: RunnerId) -> Result<RunnerReference> {
         let path = format!("/{RUNNER_ENDPOINT}/{id}");
-        let req = self.actions_request(Method::GET, &path, &[], None).await?;
-        self.send(req, &self.retry)
+
+        self.actions(Method::GET, &path, &[], None, &self.retry)
             .await?
             .expect(StatusCode::OK)?
             .json()
@@ -514,16 +512,14 @@ impl Client {
 
     /// Finds a runner by name.
     pub async fn get_runner_by_name(&self, name: &str) -> Result<Option<RunnerReference>> {
-        let req = self
-            .actions_request(
+        let list: ListResponse<RunnerReference> = self
+            .actions(
                 Method::GET,
                 RUNNER_ENDPOINT,
                 &[("agentName", name.to_owned())],
                 None,
+                &self.retry,
             )
-            .await?;
-        let list: ListResponse<RunnerReference> = self
-            .send(req, &self.retry)
             .await?
             .expect(StatusCode::OK)?
             .json()?;
@@ -535,10 +531,8 @@ impl Client {
     /// Removes a runner.
     pub async fn remove_runner(&self, id: RunnerId) -> Result<()> {
         let path = format!("/{RUNNER_ENDPOINT}/{id}");
-        let req = self
-            .actions_request(Method::DELETE, &path, &[], None)
-            .await?;
-        self.send(req, &self.retry)
+
+        self.actions(Method::DELETE, &path, &[], None, &self.retry)
             .await?
             .expect(StatusCode::NO_CONTENT)?;
         Ok(())
@@ -563,6 +557,33 @@ impl Client {
     // ---------------------------------------------------------------------
     // Requests
 
+    /// Sends a request to the Actions service with the admin token.
+    ///
+    /// If the service rejects a token that has not expired yet (it was
+    /// revoked, or the clocks disagree), the token is dropped and the
+    /// request is sent once more with a fresh one.
+    pub(crate) async fn actions(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<Vec<u8>>,
+        policy: &RetryPolicy,
+    ) -> Result<RawResponse> {
+        let token = self.admin_token().await?;
+        let req = self.actions_request_with(&token, method.clone(), path, query, body.clone())?;
+        let resp = self.send(req, policy).await?;
+        if resp.status != StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+
+        tracing::info!(url = %resp.url, "admin token rejected, refreshing it");
+        self.invalidate_admin_token(&token);
+        let token = self.admin_token().await?;
+        let req = self.actions_request_with(&token, method, path, query, body)?;
+        self.send(req, policy).await
+    }
+
     /// Builds a request to the Actions service, refreshing the admin token
     /// if needed.
     pub(crate) async fn actions_request(
@@ -573,6 +594,17 @@ impl Client {
         body: Option<Vec<u8>>,
     ) -> Result<Request> {
         let token = self.admin_token().await?;
+        self.actions_request_with(&token, method, path, query, body)
+    }
+
+    fn actions_request_with(
+        &self,
+        token: &AdminToken,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Request> {
         let url = actions_url(&token.url, path, query)?;
         let mut req = Request::new(method, url);
         let headers = req.headers_mut();
@@ -583,6 +615,14 @@ impl Client {
             *req.body_mut() = Some(body.into());
         }
         Ok(req)
+    }
+
+    /// Forgets `token` unless another task already replaced it.
+    fn invalidate_admin_token(&self, token: &Arc<AdminToken>) {
+        let mut cached = self.shared.admin.write().expect("lock poisoned");
+        if cached.as_ref().is_some_and(|t| Arc::ptr_eq(t, token)) {
+            *cached = None;
+        }
     }
 
     fn github_request(
