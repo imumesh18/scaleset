@@ -3,6 +3,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use secrecy::SecretString;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -141,19 +142,26 @@ pub struct RunnerSetting {
 #[serde(rename_all = "camelCase", default)]
 pub struct ScaleSetStatistics {
     /// Jobs available to the scale set.
+    #[serde(deserialize_with = "count")]
     pub total_available_jobs: u32,
     /// Jobs acquired by the scale set.
+    #[serde(deserialize_with = "count")]
     pub total_acquired_jobs: u32,
     /// Jobs assigned to the scale set, including running ones. This is the
     /// number of runners the scale set needs.
+    #[serde(deserialize_with = "count")]
     pub total_assigned_jobs: u32,
     /// Jobs running on the scale set's runners.
+    #[serde(deserialize_with = "count")]
     pub total_running_jobs: u32,
     /// Runners registered with the scale set.
+    #[serde(deserialize_with = "count")]
     pub total_registered_runners: u32,
     /// Runners running a job.
+    #[serde(deserialize_with = "count")]
     pub total_busy_runners: u32,
     /// Runners waiting for a job.
+    #[serde(deserialize_with = "count")]
     pub total_idle_runners: u32,
 }
 
@@ -331,32 +339,23 @@ pub struct RunnerReference {
 
 /// A just-in-time runner configuration.
 ///
-/// Treat [`encoded_jit_config`](Self::encoded_jit_config) as a secret until
-/// the runner has used it. It is redacted from `Debug` output.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// [`encoded_jit_config`](Self::encoded_jit_config) is a secret until the
+/// runner has used it; it is kept in a [`SecretString`], which is redacted
+/// from `Debug` output and wiped from memory on drop.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct JitRunnerConfig {
     /// The runner registered for this config.
     pub runner: Option<RunnerReference>,
     /// Pass to the runner as `ACTIONS_RUNNER_INPUT_JITCONFIG`, or as
-    /// `run.sh --jitconfig <value>`.
+    /// `run.sh --jitconfig <value>`. Read it with
+    /// [`ExposeSecret::expose_secret`](secrecy::ExposeSecret::expose_secret).
     #[serde(rename = "encodedJITConfig")]
-    pub encoded_jit_config: String,
-}
-
-impl fmt::Debug for JitRunnerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("JitRunnerConfig")
-            .field("runner", &self.runner)
-            .field("encoded_jit_config", &"<redacted>")
-            .finish()
-    }
+    pub encoded_jit_config: SecretString,
 }
 
 /// A message session, as created or refreshed by the service.
-///
-/// The message queue token is redacted from `Debug` output.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SessionInfo {
     /// Session ID.
@@ -368,22 +367,9 @@ pub struct SessionInfo {
     /// URL of the message queue.
     pub message_queue_url: String,
     /// Token for the message queue.
-    pub message_queue_access_token: String,
+    pub message_queue_access_token: SecretString,
     /// Statistics when the session was created.
     pub statistics: Option<ScaleSetStatistics>,
-}
-
-impl fmt::Debug for SessionInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SessionInfo")
-            .field("session_id", &self.session_id)
-            .field("owner_name", &self.owner_name)
-            .field("runner_scale_set", &self.runner_scale_set)
-            .field("message_queue_url", &self.message_queue_url)
-            .field("message_queue_access_token", &"<redacted>")
-            .field("statistics", &self.statistics)
-            .finish()
-    }
 }
 
 /// A batch of job messages from the message queue.
@@ -614,6 +600,16 @@ where
     Ok(value.filter(|t| t.timestamp() > GO_ZERO_TIME_SECS))
 }
 
+/// Deserializes a count, reading a negative or oversized value as the
+/// nearest `u32` rather than failing the whole message.
+fn count<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = i64::deserialize(deserializer)?;
+    Ok(u32::try_from(value.max(0)).unwrap_or(u32::MAX))
+}
+
 /// `0001-01-01T00:00:00Z` as a Unix timestamp.
 const GO_ZERO_TIME_SECS: i64 = -62_135_596_800;
 
@@ -707,16 +703,21 @@ mod tests {
 
     #[test]
     fn secrets_are_redacted() {
-        let jit = JitRunnerConfig {
-            runner: None,
-            encoded_jit_config: "secret".into(),
-        };
+        let jit: JitRunnerConfig =
+            serde_json::from_str(r#"{"encodedJITConfig": "secret"}"#).unwrap();
         assert!(!format!("{jit:?}").contains("secret"));
 
-        let session = SessionInfo {
-            message_queue_access_token: "secret".into(),
-            ..Default::default()
-        };
+        let session: SessionInfo =
+            serde_json::from_str(r#"{"messageQueueAccessToken": "secret"}"#).unwrap();
         assert!(!format!("{session:?}").contains("secret"));
+    }
+
+    #[test]
+    fn counts_tolerate_out_of_range_values() {
+        let stats: ScaleSetStatistics =
+            serde_json::from_str(r#"{"totalAssignedJobs": -1, "totalRunningJobs": 99999999999}"#)
+                .unwrap();
+        assert_eq!(stats.total_assigned_jobs, 0);
+        assert_eq!(stats.total_running_jobs, u32::MAX);
     }
 }

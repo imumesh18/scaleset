@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT};
 use reqwest::{Method, Request, StatusCode};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -480,6 +481,14 @@ impl Client {
 
     /// Generates a just-in-time runner configuration. Start a runner with it
     /// to add one runner to the scale set.
+    ///
+    /// Runner names are unique: a name in use fails with an error for which
+    /// [`Error::is_runner_exists`] holds. That can also happen when an
+    /// earlier attempt of this call registered the runner but its response
+    /// was lost and the request was retried. The JIT config of that attempt
+    /// cannot be recovered, so remove the runner
+    /// ([`get_runner_by_name`](Self::get_runner_by_name), then
+    /// [`remove_runner`](Self::remove_runner)) or pick a new name.
     pub async fn generate_jit_config(
         &self,
         scale_set_id: ScaleSetId,
@@ -673,7 +682,7 @@ impl Client {
 
     async fn registration_token(&self) -> Result<String> {
         let bearer = match &self.shared.credentials.kind {
-            CredentialsKind::Token(token) => format!("Bearer {token}"),
+            CredentialsKind::Token(token) => format!("Bearer {}", token.expose_secret()),
             CredentialsKind::App {
                 installation_id,
                 provider,

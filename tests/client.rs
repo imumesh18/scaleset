@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use common::{Fake, PAT, fast_retries};
 use scaleset::{
-    Client, Credentials, Error, JitRunnerSetting, RateLimitKind, RateLimitPolicy, RateLimitRule,
-    RetryPolicy, RunnerGroupId, RunnerId, RunnerScaleSetSpec, ScaleSetId, SystemInfo,
+    Client, Credentials, Error, ExposeSecret, JitRunnerSetting, RateLimitKind, RateLimitPolicy,
+    RateLimitRule, RetryPolicy, RunnerGroupId, RunnerId, RunnerScaleSetSpec, ScaleSetId,
+    SystemInfo,
 };
 use serde_json::json;
 use wiremock::matchers::{body_json, header, header_exists, method, path, query_param};
@@ -222,7 +223,7 @@ async fn jit_config() {
         .generate_jit_config(ScaleSetId(3), &JitRunnerSetting::new("r1"))
         .await
         .unwrap();
-    assert_eq!(jit.encoded_jit_config, "c2VjcmV0");
+    assert_eq!(jit.encoded_jit_config.expose_secret(), "c2VjcmV0");
     assert_eq!(jit.runner.unwrap().id, RunnerId(11));
 }
 

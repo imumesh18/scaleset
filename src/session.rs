@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT};
 use reqwest::{Method, Request, StatusCode};
+use secrecy::ExposeSecret;
 use serde::Serialize;
 use url::Url;
 use uuid::Uuid;
@@ -15,6 +16,7 @@ use crate::client::{
     to_json,
 };
 use crate::error::{ApiErrorKind, Error, Result};
+use crate::listener::{MaxRunners, Subscription};
 use crate::transport::RawResponse;
 use crate::types::{
     JobRequestId, ListResponse, MessageId, RawMessage, ScaleSetId, ScaleSetMessage, SessionInfo,
@@ -242,6 +244,13 @@ impl MessageSession {
         Ok(list.value)
     }
 
+    /// Pulls events from this session one at a time. See
+    /// [`Subscription`](crate::listener::Subscription); most users want a
+    /// [`Listener`](crate::listener::Listener) instead.
+    pub fn subscribe(&self, max_runners: impl Into<MaxRunners>) -> Subscription {
+        Subscription::new(self.clone(), max_runners.into())
+    }
+
     /// Deletes the session.
     pub async fn close(&self) -> Result<()> {
         let info = self.info();
@@ -287,7 +296,8 @@ impl MessageSession {
         let _guard = self.inner.refresh.lock().await;
         let current = self.info();
         if current.session_id != expired.session_id
-            || current.message_queue_access_token != expired.message_queue_access_token
+            || current.message_queue_access_token.expose_secret()
+                != expired.message_queue_access_token.expose_secret()
         {
             return Ok(());
         }
@@ -325,7 +335,10 @@ fn queue_url(info: &SessionInfo) -> Result<Url> {
 }
 
 fn queue_auth(info: &SessionInfo) -> Result<HeaderValue> {
-    sensitive(&format!("Bearer {}", info.message_queue_access_token))
+    sensitive(&format!(
+        "Bearer {}",
+        info.message_queue_access_token.expose_secret()
+    ))
 }
 
 /// A 401 from the queue means its token expired.

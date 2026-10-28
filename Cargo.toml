@@ -3,44 +3,54 @@ name = "scaleset"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Client for the GitHub Actions Runner Scale Set APIs: build your own autoscaler for self-hosted runners."
+description = "Autoscale GitHub Actions self-hosted runners: a client for the Runner Scale Set APIs."
 license = "MIT"
 repository = "https://github.com/imumesh18/scaleset"
+documentation = "https://docs.rs/scaleset"
 readme = "README.md"
-keywords = ["github", "actions", "runners", "autoscaling", "scaleset"]
-categories = ["api-bindings", "asynchronous"]
+keywords = ["github", "actions", "runners", "autoscaling", "ci"]
+categories = ["api-bindings", "asynchronous", "development-tools"]
+include = [
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "docs/DESIGN.md",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+]
 
 [features]
 default = ["rustls"]
-## Use rustls (with aws-lc-rs) for TLS.
+# TLS through rustls (with aws-lc-rs).
 rustls = ["reqwest/rustls"]
-## Use the platform's native TLS stack.
+# TLS through the platform's native library.
 native-tls = ["reqwest/native-tls"]
-## A stateful in-process emulator of the scale set APIs, for tests
-## (`scaleset::testing`), and the `scaleset-emulator` binary.
+# `scaleset::testing`, a stateful emulator of the scale set APIs, and the
+# `scaleset-emulator` binary.
 testing = ["dep:axum", "tokio/net", "tokio/rt", "tokio/signal"]
 
 [dependencies]
 aws-lc-rs = { version = "1.13", default-features = false, features = ["aws-lc-sys", "alloc"] }
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
 base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 fastrand = "2"
 httpdate = "1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "charset", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "charset", "system-proxy"] }
+secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.38", features = ["sync", "time", "macros"] }
+tokio = { version = "1.38", features = ["macros", "sync", "time"] }
 tracing = "0.1"
 url = "2.5"
 uuid = { version = "1", features = ["serde"] }
 
-axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "json", "query", "tokio"] }
-
 [dev-dependencies]
-scaleset = { path = ".", features = ["testing"] }
 anyhow = "1"
+# The crate's own tests use the emulator.
+scaleset = { path = ".", features = ["testing"] }
 tokio = { version = "1.38", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wiremock = "0.6"
@@ -51,3 +61,4 @@ required-features = ["testing"]
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

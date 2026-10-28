@@ -17,6 +17,7 @@
 //! | `DELETE /_emulator/faults` | clear faults |
 //! | `POST /_emulator/expire/admin-tokens` | expire admin tokens |
 //! | `POST /_emulator/expire/queue-token/{scaleSetId}` | expire a session's queue token |
+//! | `POST /_emulator/expire/session/{scaleSetId}` | drop a session, as if it timed out |
 //! | `POST /_emulator/reset` | clear everything |
 
 use std::net::{IpAddr, SocketAddr};

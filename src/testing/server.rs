@@ -7,13 +7,14 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::state::{ScaleSetBody, ServiceError, ServiceResult};
 use super::{Endpoint, Fault, FaultResponse, Inner, RecordedRequest};
-use crate::types::{JobRequestId, MessageId, RunnerGroupId, RunnerId, ScaleSetId};
+use crate::types::{JobRequestId, MessageId, RunnerGroupId, RunnerId, ScaleSetId, SessionInfo};
 
 const MAX_BODY: usize = 1 << 20;
 
@@ -443,12 +444,12 @@ async fn route(inner: &Arc<Inner>, req: &Req) -> ServiceResult<Response> {
             }
             let body: Body = req.json()?;
             let session = inner.lock().create_session(*id, body.owner_name)?;
-            ok(StatusCode::OK, json!(session))
+            ok(StatusCode::OK, session_json(&session))
         }
         Route::Session(id, sid) => match *m {
             Method::PATCH => ok(
                 StatusCode::OK,
-                json!(inner.lock().refresh_session(*id, *sid)?),
+                session_json(&inner.lock().refresh_session(*id, *sid)?),
             ),
             Method::DELETE => {
                 inner.lock().delete_session(*id, *sid)?;
@@ -603,6 +604,18 @@ fn control(inner: &Arc<Inner>, req: &Req, path: &[String]) -> ServiceResult<Resp
                 Err(ServiceError::not_found("session"))
             }
         }
+        ["expire", "session", id] if m == Method::POST => {
+            let id = id
+                .parse()
+                .map(ScaleSetId)
+                .map_err(|_| ServiceError::new(400, "invalid scale set ID"))?;
+            if inner.lock().expire_session(id) {
+                inner.on_change();
+                no_content()
+            } else {
+                Err(ServiceError::not_found("session"))
+            }
+        }
         ["reset"] if m == Method::POST => {
             {
                 let mut state = inner.lock();
@@ -620,6 +633,18 @@ fn control(inner: &Arc<Inner>, req: &Req, path: &[String]) -> ServiceResult<Resp
         }
         _ => Err(ServiceError::new(404, "no such control endpoint")),
     }
+}
+
+/// The wire form of a session, token included.
+fn session_json(session: &SessionInfo) -> Value {
+    json!({
+        "sessionId": session.session_id,
+        "ownerName": session.owner_name,
+        "runnerScaleSet": session.runner_scale_set,
+        "messageQueueUrl": session.message_queue_url,
+        "messageQueueAccessToken": session.message_queue_access_token.expose_secret(),
+        "statistics": session.statistics,
+    })
 }
 
 fn in_an_hour() -> String {

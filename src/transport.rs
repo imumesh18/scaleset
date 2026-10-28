@@ -7,6 +7,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use reqwest::{Method, Request, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use crate::error::{
     ActionsException, ApiError, ApiErrorKind, Error, RateLimitError, RateLimitKind, Result,
@@ -194,6 +195,23 @@ fn mentions_secondary_rate(message: &str) -> bool {
 ///
 /// The request body must be in memory, so every attempt can resend it.
 pub(crate) async fn send(
+    http: &reqwest::Client,
+    request: Request,
+    policy: &RetryPolicy,
+) -> Result<RawResponse> {
+    // The path, not the full URL: queries can carry names, and the span
+    // shows up in every event logged for the request.
+    let span = tracing::debug_span!(
+        "scaleset.request",
+        method = %request.method(),
+        path = request.url().path(),
+    );
+    send_with_retries(http, request, policy)
+        .instrument(span)
+        .await
+}
+
+async fn send_with_retries(
     http: &reqwest::Client,
     request: Request,
     policy: &RetryPolicy,

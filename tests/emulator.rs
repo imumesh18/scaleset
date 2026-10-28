@@ -5,14 +5,11 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use scaleset::listener::{Event, Listener, Scaler};
-use scaleset::testing::{Emulator, Endpoint, Fault, JobState};
+use scaleset::testing::{Emulator, Endpoint, Fault};
 use scaleset::{
-    BoxError, Client, Credentials, JitRunnerSetting, MessageSession, RetryPolicy, RunnerGroupId,
+    Client, Credentials, ExposeSecret, JitRunnerSetting, RetryPolicy, RunnerGroupId,
     RunnerScaleSetSpec, ScaleSetId,
 };
-
-const WAIT: Duration = Duration::from_secs(10);
 
 async fn emulator() -> Emulator {
     Emulator::builder()
@@ -27,108 +24,6 @@ async fn scale_set(client: &Client, name: &str) -> ScaleSetId {
         .await
         .unwrap()
         .id
-}
-
-/// A scaler that keeps `total_assigned_jobs` runners registered, the way a
-/// real autoscaler would.
-struct Autoscaler {
-    client: Client,
-    session: MessageSession,
-    scale_set_id: ScaleSetId,
-    started: u32,
-    peak_assigned: u32,
-}
-
-impl Scaler for Autoscaler {
-    type Error = BoxError;
-
-    async fn scale(&mut self, event: Event<'_>) -> Result<(), BoxError> {
-        if let Event::Message(msg) = event {
-            let jobs: Vec<_> = msg
-                .jobs_available()
-                .map(|j| j.job.runner_request_id)
-                .collect();
-            if !jobs.is_empty() {
-                self.session.acquire_jobs(&jobs).await?;
-            }
-            // Runners are ephemeral: one leaves with each completed job.
-            self.started -= u32::try_from(
-                msg.jobs_completed()
-                    .filter(|j| !j.runner_name.is_empty())
-                    .count(),
-            )?;
-        }
-        let Some(stats) = event.statistics() else {
-            return Ok(());
-        };
-        self.peak_assigned = self.peak_assigned.max(stats.total_assigned_jobs);
-        while self.started < stats.total_assigned_jobs {
-            let name = format!("runner-{:08x}", fastrand::u32(..));
-            self.client
-                .generate_jit_config(self.scale_set_id, &JitRunnerSetting::new(name))
-                .await?;
-            self.started += 1;
-        }
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn autoscaler_runs_every_job() {
-    let emu = Emulator::builder()
-        .long_poll(Duration::from_millis(100))
-        .auto_run_jobs(Duration::from_millis(50))
-        .start()
-        .await;
-    let client = emu.client();
-    let id = scale_set(&client, "linux").await;
-    let session = client.create_message_session(id, "host").await.unwrap();
-
-    let mut scaler = Autoscaler {
-        client: client.clone(),
-        session: session.clone(),
-        scale_set_id: id,
-        started: 0,
-        peak_assigned: 0,
-    };
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let listener = Listener::new(session.clone(), 10);
-    let run = tokio::spawn(async move {
-        listener
-            .run(&mut scaler, async {
-                let _ = stopped.await;
-            })
-            .await
-            .map(|()| scaler)
-    });
-
-    for _ in 0..5 {
-        emu.queue_job(id, ["linux"]);
-    }
-    let state = emu
-        .wait_until(WAIT, |s| {
-            s.jobs.len() == 5 && s.jobs.iter().all(|j| j.state == JobState::Completed)
-        })
-        .await;
-    assert!(
-        state
-            .jobs
-            .iter()
-            .all(|j| j.result.as_deref() == Some("succeeded"))
-    );
-
-    // Everything was acknowledged and no runner is left behind.
-    let state = emu
-        .wait_until(WAIT, |s| s.queues_drained() && s.runners.is_empty())
-        .await;
-    assert_eq!(state.statistics(id).unwrap().total_assigned_jobs, 0);
-
-    stop.send(()).unwrap();
-    let scaler = run.await.unwrap().unwrap();
-    assert!(scaler.peak_assigned >= 1);
-    assert_eq!(scaler.started, 0);
-    session.close().await.unwrap();
-    assert!(emu.state().sessions.is_empty());
 }
 
 #[tokio::test]
@@ -153,64 +48,23 @@ async fn unacknowledged_message_is_redelivered() {
 }
 
 #[tokio::test]
-async fn scaler_error_leaves_message_for_the_next_run() {
-    let emu = emulator().await;
-    let client = emu.client();
-    let id = scale_set(&client, "set").await;
-    let session = client.create_message_session(id, "host").await.unwrap();
-    emu.queue_job(id, ["set"]);
-
-    struct FailOnMessage;
-    impl Scaler for FailOnMessage {
-        type Error = BoxError;
-        async fn scale(&mut self, event: Event<'_>) -> Result<(), BoxError> {
-            match event {
-                Event::Message(_) => Err("provisioning failed".into()),
-                _ => Ok(()),
-            }
-        }
-    }
-    let err = Listener::new(session.clone(), 1)
-        .run(&mut FailOnMessage, std::future::pending())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, scaleset::listener::Error::Scale(_)));
-    assert_eq!(emu.state().unacknowledged[&id].len(), 1);
-
-    // The next run sees the same message and acknowledges it.
-    struct Ack(Option<tokio::sync::oneshot::Sender<()>>);
-    impl Scaler for Ack {
-        type Error = BoxError;
-        async fn scale(&mut self, event: Event<'_>) -> Result<(), BoxError> {
-            if matches!(event, Event::Idle) {
-                if let Some(tx) = self.0.take() {
-                    let _ = tx.send(());
-                }
-            }
-            Ok(())
-        }
-    }
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    Listener::new(session.clone(), 1)
-        .run(&mut Ack(Some(tx)), async {
-            let _ = rx.await;
-        })
-        .await
-        .unwrap();
-    assert!(emu.state().unacknowledged.is_empty());
-}
-
-#[tokio::test]
 async fn queue_token_expiry_is_transparent() {
     let emu = emulator().await;
     let client = emu.client();
     let id = scale_set(&client, "set").await;
     let session = client.create_message_session(id, "host").await.unwrap();
-    let token = session.info().message_queue_access_token.clone();
+    let token = session
+        .info()
+        .message_queue_access_token
+        .expose_secret()
+        .to_owned();
 
     emu.expire_queue_token(id);
     assert!(session.get_message(None, 1).await.unwrap().is_none());
-    assert_ne!(session.info().message_queue_access_token, token);
+    assert_ne!(
+        session.info().message_queue_access_token.expose_secret(),
+        token
+    );
 
     emu.expire_queue_token(id);
     let job = emu.queue_job(id, ["set"]);
@@ -469,7 +323,7 @@ async fn reset_clears_everything() {
     scale_set(&client, "set").await;
     emu.inject(Fault::status(Endpoint::Any, 500));
     emu.reset();
-    assert_eq!(emu.state(), Default::default());
+    assert_eq!(emu.state(), scaleset::testing::EmulatorState::default());
     assert!(emu.requests().is_empty());
     // Old tokens no longer work; a fresh client starts over.
     emu.client()

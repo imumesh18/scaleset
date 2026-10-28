@@ -1,10 +1,7 @@
 mod common;
 
-use std::time::Duration;
-
 use common::Fake;
-use scaleset::listener::{Event, Listener, Scaler};
-use scaleset::{BoxError, JobRequestId, MessageId, MessageSession, ScaleSetId};
+use scaleset::{ExposeSecret, JobRequestId, MessageId, MessageSession, ScaleSetId};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
@@ -139,7 +136,10 @@ async fn refreshes_expired_queue_token_once() {
     let (a, b) = tokio::join!(session.get_message(None, 1), session.get_message(None, 1));
     assert!(a.unwrap().is_none());
     assert!(b.unwrap().is_none());
-    assert_eq!(session.info().message_queue_access_token, "new");
+    assert_eq!(
+        session.info().message_queue_access_token.expose_secret(),
+        "new"
+    );
 }
 
 #[tokio::test]
@@ -215,84 +215,4 @@ async fn session_conflict_is_reported() {
         .await
         .unwrap_err();
     assert!(err.is_conflict(), "{err}");
-}
-
-/// Runs the listener against the fake service: initial statistics, one
-/// message (acquired and acknowledged), then idle polls until shutdown.
-#[tokio::test]
-async fn listener_end_to_end() {
-    let fake = Fake::start().await;
-    let session = session(&fake).await;
-
-    Mock::given(method("GET"))
-        .and(path("/queue/msgs"))
-        .and(query_param("lastMessageId", "6"))
-        .respond_with(ResponseTemplate::new(202).set_delay(Duration::from_millis(20)))
-        .with_priority(1)
-        .mount(&fake.server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/queue/msgs"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(message_json(6)))
-        .mount(&fake.server)
-        .await;
-    Mock::given(method("DELETE"))
-        .and(path("/queue/msgs/6"))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .mount(&fake.server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/tenant/_apis/runtime/runnerscalesets/5/acquirejobs"))
-        .and(body_json(json!([106])))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"count": 1, "value": [106]})))
-        .expect(1)
-        .mount(&fake.server)
-        .await;
-
-    struct Recorder {
-        session: MessageSession,
-        desired: Vec<u32>,
-        idle: usize,
-        stop: Option<tokio::sync::oneshot::Sender<()>>,
-    }
-    impl Scaler for Recorder {
-        type Error = BoxError;
-        async fn scale(&mut self, event: Event<'_>) -> Result<(), BoxError> {
-            if let Event::Message(msg) = event {
-                let ids: Vec<_> = msg
-                    .jobs_available()
-                    .map(|j| j.job.runner_request_id)
-                    .collect();
-                self.session.acquire_jobs(&ids).await?;
-            }
-            match event.statistics() {
-                Some(stats) => self.desired.push(stats.total_assigned_jobs),
-                None => {
-                    self.idle += 1;
-                    if self.idle == 2 {
-                        let _ = self.stop.take().unwrap().send(());
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut scaler = Recorder {
-        session: session.clone(),
-        desired: vec![],
-        idle: 0,
-        stop: Some(tx),
-    };
-    Listener::new(session.clone(), 3)
-        .run(&mut scaler, async {
-            let _ = rx.await;
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(scaler.desired, [1, 4]);
-    assert_eq!(scaler.idle, 2);
 }

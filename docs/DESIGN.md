@@ -97,12 +97,14 @@ scaleset
 ├── RetryPolicy, RateLimitPolicy …  retry.rs
 ├── MessageSession                  session.rs
 ├── types (ids, scale sets, msgs)   types.rs
-├── listener::{Listener, Scaler, Event, MessageSource}
+├── listener::{Listener, Scaler, Event, Subscription, JobTracker}
+├── testing::Emulator               (feature `testing`)
 └── (internal) transport.rs         the retry engine
 ```
 
-One crate, not a workspace. The listener is a small module, not a separate
-crate as in Go, because it adds no dependencies.
+One crate, not a workspace. The listener is a module, not a separate crate
+as in Go, because it adds no dependencies; the emulator is a module behind a
+feature so it can never drift from the client it imitates.
 
 ### Construction: a builder, not functional options
 
@@ -261,10 +263,17 @@ small internal object-safe wrapper, so users never need `async_trait` or
   become `JobMessage::Unknown` instead of being dropped silently.
 * **Times** are `Option<DateTime<Utc>>`; Go's zero time
   (`0001-01-01T00:00:00Z`) maps to `None`.
-* **Secrets** (`JitRunnerConfig::encoded_jit_config`, session queue token,
-  PAT) are redacted in `Debug` output.
+* **Secrets** (`JitRunnerConfig::encoded_jit_config`, the session queue
+  token, the PAT) are `secrecy::SecretString`: redacted in `Debug`, wiped on
+  drop, never serialized, and read only through `expose_secret()`.
+* **Counts** in statistics are `u32`; a negative or oversized value from the
+  service is clamped rather than failing the whole message.
 
 ### Listener
+
+Go's listener takes an open session, polls, calls `Scale`, and acknowledges;
+any error stops it. Production autoscalers need more, so the listener owns
+the whole loop:
 
 ```rust
 pub trait Scaler: Send {
@@ -273,38 +282,56 @@ pub trait Scaler: Send {
 }
 
 pub enum Event<'a> {
-    Initial(&'a ScaleSetStatistics),  // session statistics, before the first poll
-    Message(&'a ScaleSetMessage),     // a batch; acknowledged after scale() succeeds
-    Idle,                             // the long poll returned nothing
+    Initial { statistics: &'a ScaleSetStatistics },  // a session was opened
+    Message { message: &'a ScaleSetMessage, statistics: &'a ScaleSetStatistics },
+    Idle { statistics: &'a ScaleSetStatistics },     // the long poll returned nothing
 }
 
-let listener = Listener::new(session.clone(), max_runners);
-listener.run(&mut scaler, shutdown_signal).await?;
+Listener::new(client, scale_set_id)
+    .max_runners(10)
+    .run(&mut scaler, shutdown)
+    .await?;
 ```
 
-Differences from Go:
+What it does, and how that differs from Go:
 
-* `scale` takes `&mut self`. Go promises `Scale` is never called
-  concurrently; the borrow checker now enforces it, and scalers can keep
-  state without a mutex.
-* `Event` replaces two conventions in Go: a `nil` message for an idle poll,
-  and a synthetic message with ID `-1` for the initial statistics.
-* `run` takes a shutdown future (`ctrl_c()`, `token.cancelled()`, …) instead
-  of a context. Shutdown interrupts a poll or a `scale` call, but never an
-  acknowledgment once `scale` has succeeded, matching Go's
-  `context.WithoutCancel` on the delete. A graceful shutdown returns `Ok(())`.
-* `Scaler::Error` only needs `Into<Box<dyn Error + Send + Sync>>`, so
-  `anyhow::Error` works.
-* `Listener` is generic over `MessageSource` (implemented by
-  `MessageSession`), so it can be tested without HTTP.
-* Max capacity can be changed while running through `set_max_runners` or a
-  cloneable `MaxRunners` handle.
+* **It opens and closes the session.** A 409 on open, the previous run's
+  session still alive after a crash, is retried until that session
+  expires. A session that disappears (404) is replaced, and the scaler sees
+  `Event::Initial` again.
+* **It acquires every available job before calling the scaler.** In Go each
+  scaler must remember to; forgetting leaves jobs unassigned. Callers who
+  want to choose use `Subscription`.
+* **It recovers.** A failed step (poll, acquire, scale, acknowledge) backs off
+  exponentially and is retried; the message is delivered again because it was
+  not acknowledged. It gives up after `max_failures` failures in a row
+  (default 10; 0 restores Go's stop-on-first-error).
+* **Every event carries statistics.** Idle polls repeat the last known ones,
+  so a scaler can keep converging without caching them itself. This replaces
+  Go's `nil` message and its synthetic initial message with ID `-1`.
+* **`scale` takes `&mut self`.** Go promises it is never called
+  concurrently; the borrow checker enforces it, and scalers need no mutex.
+* **Shutdown is a future** (`ctrl_c()`, `token.cancelled()`, …). It
+  interrupts a poll, a backoff or `scale`, but not an acknowledgment, as Go
+  does with `context.WithoutCancel`.
+* **Slow provisioning is decoupled.** `watch::Sender<ScaleSetStatistics>`
+  implements `Scaler`, so a separate task can reconcile at its own pace while
+  the listener keeps polling and acknowledging (level-triggered, like a
+  Kubernetes controller).
+* **`JobTracker`** follows jobs by request ID through assignment, start and
+  completion, to tell busy runners from idle ones (what ARC uses `JobStarted`
+  for) without double counting reassigned jobs.
+* **`Subscription`** is the pull API underneath: `next()` yields events,
+  `ack()` acknowledges, and calling `next()` without `ack()` gives the
+  message back. It borrows mutably, so a message can't be held across polls.
+* Capacity can change while running through a shared `MaxRunners` handle.
 
 ### Logging
 
-`tracing` spans and events (`debug` for retries, `info` for token refresh
-and polling) replace the injected `slog.Logger`. Applications choose a
-subscriber; the library never installs one.
+`tracing` replaces the injected `slog.Logger`: every HTTP request runs in a
+`scaleset.request` span (method and path, never the query), retries log at
+`debug`, token refreshes and session changes at `info`, listener failures at
+`warn`. Applications choose a subscriber; the library never installs one.
 
 ### User agent
 
@@ -323,6 +350,12 @@ Same JSON user agent as Go (`system`, `version`, `commit_sha`,
   their migration path.
 * Honoring a caller deadline when deciding whether to sleep before a retry:
   Rust has no ambient deadline. `max_elapsed` covers this case.
+* Orphaned runner cleanup. The API has no documented way to list a scale
+  set's runners, so cleanup needs your own inventory; `get_runner_by_name`
+  and `remove_runner` do the rest.
+* Typed TLS certificate errors. `reqwest` does not expose them, so the retry
+  policy recognizes certificate failures by their message to avoid retrying
+  them.
 
 ## 4. Dependencies
 
@@ -338,6 +371,7 @@ Same JSON user agent as Go (`system`, `version`, `commit_sha`,
 | `url` | URL parsing and joining |
 | `thiserror` | error types |
 | `tracing` | logs |
+| `secrecy` | secrets that are redacted and zeroized |
 | `httpdate`, `fastrand` | `Retry-After` dates, backoff jitter |
 | `axum` (only with `testing`) | the emulator's HTTP server |
 
@@ -349,10 +383,11 @@ Two kinds of test, each with the tool that suits it:
   They pin exact bytes: headers, query strings, bodies, status sequences
   (401 then 200), `Retry-After`, delays and a byte order mark. These guard
   the protocol contract.
-* **Behavior tests** (`tests/emulator.rs`) use `scaleset::testing::Emulator`,
-  a stateful emulator shipped behind the `testing` feature. They run whole
-  scenarios: an autoscaler draining a queue, redelivery after a crash, token
-  expiry, session conflicts, busy runners, injected faults.
+* **Behavior tests** (`tests/emulator.rs`, `tests/listener.rs`) use
+  `scaleset::testing::Emulator`, a stateful emulator shipped behind the
+  `testing` feature. They run whole scenarios: an autoscaler draining a
+  queue, redelivery after a scaler error, token and session expiry, a stale
+  session after a restart, busy runners, injected faults.
 
 Unit tests cover URL parsing, rate-limit classification, `Retry-After`,
 backoff, JWT signing and message decoding.

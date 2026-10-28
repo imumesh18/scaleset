@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::Utc;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -68,6 +69,18 @@ pub struct EmulatedRunner {
     pub job: Option<JobRequestId>,
 }
 
+/// An open message session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmulatedSession {
+    /// Session ID.
+    pub session_id: Uuid,
+    /// The scale set it belongs to.
+    pub scale_set_id: ScaleSetId,
+    /// Owner name given at creation.
+    pub owner_name: String,
+}
+
 /// A point-in-time copy of the emulator's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +88,7 @@ pub struct EmulatorState {
     /// Scale sets, with current statistics.
     pub scale_sets: Vec<RunnerScaleSet>,
     /// Open sessions.
-    pub sessions: Vec<SessionInfo>,
+    pub sessions: Vec<EmulatedSession>,
     /// Registered runners.
     pub runners: Vec<EmulatedRunner>,
     /// All jobs, including completed ones.
@@ -575,7 +588,7 @@ impl State {
             owner_name: owner,
             runner_scale_set: Some(entry.set.clone()),
             message_queue_url: format!("{base}/queue/{scale_set_id}/{session_id}"),
-            message_queue_access_token: Self::token("queue"),
+            message_queue_access_token: Self::token("queue").into(),
             statistics: Some(stats),
         };
         entry.session = Some(Session {
@@ -604,7 +617,7 @@ impl State {
     ) -> ServiceResult<SessionInfo> {
         let stats = self.statistics(scale_set_id);
         let session = self.session_mut(scale_set_id, session_id)?;
-        session.info.message_queue_access_token = Self::token("queue");
+        session.info.message_queue_access_token = Self::token("queue").into();
         session.info.statistics = Some(stats);
         session.token_valid = true;
         Ok(session.info.clone())
@@ -618,6 +631,14 @@ impl State {
         self.session_mut(scale_set_id, session_id)?;
         self.entry(scale_set_id)?.session = None;
         Ok(())
+    }
+
+    /// Drops a scale set's session, as if it timed out on the service.
+    pub fn expire_session(&mut self, scale_set_id: ScaleSetId) -> bool {
+        self.scale_sets
+            .get_mut(&scale_set_id)
+            .and_then(|e| e.session.take())
+            .is_some()
     }
 
     /// Makes the queue token of a scale set's session stop working, as if
@@ -649,7 +670,9 @@ impl State {
             .and_then(|e| e.session.as_ref())
             .filter(|s| session_id.is_none_or(|id| id == s.info.session_id))
             .ok_or_else(|| ServiceError::not_found("session"))?;
-        if session.token_valid && bearer == Some(session.info.message_queue_access_token.as_str()) {
+        if session.token_valid
+            && bearer == Some(session.info.message_queue_access_token.expose_secret())
+        {
             Ok(())
         } else {
             Err(ServiceError::unauthorized())
@@ -886,7 +909,13 @@ impl State {
             sessions: self
                 .scale_sets
                 .values()
-                .filter_map(|e| e.session.as_ref().map(|s| s.info.clone()))
+                .filter_map(|e| {
+                    e.session.as_ref().map(|s| EmulatedSession {
+                        session_id: s.info.session_id,
+                        scale_set_id: e.set.id,
+                        owner_name: s.info.owner_name.clone(),
+                    })
+                })
                 .collect(),
             runners: self.runners.values().cloned().collect(),
             jobs: self.jobs.values().map(|j| j.public.clone()).collect(),

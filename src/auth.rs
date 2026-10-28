@@ -10,6 +10,7 @@ use aws_lc_rs::rsa::KeyPair;
 use aws_lc_rs::signature::RSA_PKCS1_SHA256;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BoxError, Error};
@@ -62,7 +63,7 @@ pub struct Credentials {
 
 #[derive(Clone)]
 pub(crate) enum CredentialsKind {
-    Token(String),
+    Token(SecretString),
     App {
         installation_id: i64,
         provider: Arc<dyn DynJwtProvider>,
@@ -79,7 +80,7 @@ impl Credentials {
             ));
         }
         Ok(Self {
-            kind: CredentialsKind::Token(token),
+            kind: CredentialsKind::Token(token.into()),
         })
     }
 

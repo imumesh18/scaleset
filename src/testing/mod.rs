@@ -74,7 +74,7 @@ use crate::client::{Client, ClientBuilder};
 use crate::retry::RetryPolicy;
 use crate::types::{JobRequestId, RunnerId, ScaleSetId, ScaleSetStatistics};
 
-pub use state::{EmulatedJob, EmulatedRunner, EmulatorState, JobState};
+pub use state::{EmulatedJob, EmulatedRunner, EmulatedSession, EmulatorState, JobState};
 
 /// Personal access token the emulator accepts by default.
 pub const DEFAULT_PAT: &str = "ghp_emulator";
@@ -372,6 +372,20 @@ impl Emulator {
             self.inner.lock().expire_queue_token(scale_set_id),
             "scale set {scale_set_id} has no session"
         );
+    }
+
+    /// Drops the scale set's session, as if it timed out on the service.
+    /// Its next poll gets a 404.
+    ///
+    /// # Panics
+    ///
+    /// If the scale set has no session.
+    pub fn expire_session(&self, scale_set_id: ScaleSetId) {
+        assert!(
+            self.inner.lock().expire_session(scale_set_id),
+            "scale set {scale_set_id} has no session"
+        );
+        self.inner.on_change();
     }
 
     /// Adds a fault. Faults are checked in the order added.
