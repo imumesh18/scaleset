@@ -1,0 +1,43 @@
+[package]
+name = "scaleset"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Client for the GitHub Actions Runner Scale Set APIs: build your own autoscaler for self-hosted runners."
+license = "MIT"
+repository = "https://github.com/imumesh18/scaleset"
+readme = "README.md"
+keywords = ["github", "actions", "runners", "autoscaling", "scaleset"]
+categories = ["api-bindings", "asynchronous"]
+
+[features]
+default = ["rustls"]
+## Use rustls (with aws-lc-rs) for TLS.
+rustls = ["reqwest/rustls"]
+## Use the platform's native TLS stack.
+native-tls = ["reqwest/native-tls"]
+
+[dependencies]
+aws-lc-rs = { version = "1.13", default-features = false, features = ["aws-lc-sys", "alloc"] }
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+fastrand = "2"
+httpdate = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "charset", "system-proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.38", features = ["sync", "time", "macros"] }
+tracing = "0.1"
+url = "2.5"
+uuid = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+anyhow = "1"
+tokio = { version = "1.38", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wiremock = "0.6"
+
+[package.metadata.docs.rs]
+all-features = true
