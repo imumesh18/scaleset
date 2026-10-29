@@ -6,6 +6,10 @@ name: Release
 # - `release-pr` opens or updates a pull request that bumps the version and
 #   updates CHANGELOG.md from the Conventional Commit messages since the last
 #   release. Merging that pull request triggers the release.
+#
+# Publishing uses crates.io trusted publishing: release-plz exchanges the
+# job's GitHub OIDC token for a short-lived crates.io token, so no API token
+# is stored in the repository.
 
 on:
   push:
@@ -30,6 +34,8 @@ jobs:
       contents: write
       # Find the release PR a commit came from.
       pull-requests: read
+      # Trusted publishing to crates.io.
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,7 +52,6 @@ jobs:
         run: release-plz release --git-token "$GITHUB_TOKEN"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   release-pr:
     if: github.repository_owner == 'imumesh18'

@@ -58,8 +58,9 @@ Releases are automated with [release-plz](https://release-plz.dev)
 
 Maintainers set up once:
 
-- `CARGO_REGISTRY_TOKEN`: a crates.io API token with the `publish-new` and
-  `publish-update` scopes.
+- On crates.io, in the crate's Settings, Trusted Publishing: add GitHub with
+  owner `imumesh18`, repository `scaleset` and workflow `release.yml`. The
+  release job then publishes without an API token.
 - Optional `RELEASE_PLZ_TOKEN`: a fine-grained token with contents and pull
   request write access. Pull requests opened with the default `GITHUB_TOKEN`
   do not trigger CI, so without it CI does not run on release pull requests.
