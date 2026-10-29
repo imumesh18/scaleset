@@ -1,0 +1,84 @@
+name: Release
+
+# release-plz runs on every push to main:
+# - `release` publishes any version that is not on crates.io yet, tags it
+#   (`vX.Y.Z`) and creates the GitHub release from CHANGELOG.md;
+# - `release-pr` opens or updates a pull request that bumps the version and
+#   updates CHANGELOG.md from the Conventional Commit messages since the last
+#   release. Merging that pull request triggers the release.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_PLZ_VERSION: 0.4.2
+  RELEASE_PLZ_SHA256: bd7c3adc1a4ed3831e6bfde51b92b168f32ab6d15cd210ed88044e7f858f0cae
+  SEMVER_CHECKS_VERSION: 0.51.0
+  SEMVER_CHECKS_SHA256: cacadafaa5cd27ae6d05a74a103266917ebab4c5e43c898360e177d4fbf06a65
+
+jobs:
+  release:
+    if: github.repository_owner == 'imumesh18'
+    runs-on: ubuntu-latest
+    permissions:
+      # Create tags and releases.
+      contents: write
+      # Find the release PR a commit came from.
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Install release-plz
+        run: |
+          curl -sSfL -o release-plz.tar.gz "https://github.com/release-plz/release-plz/releases/download/release-plz-v${RELEASE_PLZ_VERSION}/release-plz-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${RELEASE_PLZ_SHA256}  release-plz.tar.gz" | sha256sum --check
+          tar -xzf release-plz.tar.gz -C "$HOME/.cargo/bin" release-plz
+          rm release-plz.tar.gz
+      - name: Release
+        run: release-plz release --git-token "$GITHUB_TOKEN"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-pr:
+    if: github.repository_owner == 'imumesh18'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Install release-plz and cargo-semver-checks
+        run: |
+          curl -sSfL -o release-plz.tar.gz "https://github.com/release-plz/release-plz/releases/download/release-plz-v${RELEASE_PLZ_VERSION}/release-plz-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${RELEASE_PLZ_SHA256}  release-plz.tar.gz" | sha256sum --check
+          tar -xzf release-plz.tar.gz -C "$HOME/.cargo/bin" release-plz
+          curl -sSfL -o semver-checks.tar.gz "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v${SEMVER_CHECKS_VERSION}/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${SEMVER_CHECKS_SHA256}  semver-checks.tar.gz" | sha256sum --check
+          tar -xzf semver-checks.tar.gz -C "$HOME/.cargo/bin" cargo-semver-checks
+          rm release-plz.tar.gz semver-checks.tar.gz
+      - name: Open or update the release pull request
+        # Pull requests opened with GITHUB_TOKEN do not trigger CI. Set the
+        # RELEASE_PLZ_TOKEN secret (a fine-grained PAT with contents and pull
+        # request write access) so CI runs on the release pull request.
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          release-plz release-pr --git-token "$GIT_TOKEN" --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+        env:
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

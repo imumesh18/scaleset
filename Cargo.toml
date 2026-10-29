@@ -1,0 +1,62 @@
+[package]
+name = "scaleset"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Autoscale GitHub Actions self-hosted runners: a client for the Runner Scale Set APIs."
+license = "MIT"
+repository = "https://github.com/imumesh18/scaleset"
+documentation = "https://docs.rs/scaleset"
+readme = "README.md"
+keywords = ["github", "actions", "runners", "autoscaling", "ci"]
+categories = ["api-bindings", "asynchronous", "development-tools"]
+include = [
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+]
+
+[features]
+default = ["rustls"]
+# TLS through rustls (with aws-lc-rs).
+rustls = ["reqwest/rustls"]
+# TLS through the platform's native library.
+native-tls = ["reqwest/native-tls"]
+# `scaleset::testing`, a stateful emulator of the scale set APIs, and the
+# `scaleset-emulator` binary.
+testing = ["dep:axum", "tokio/net", "tokio/rt", "tokio/signal"]
+
+[dependencies]
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys", "alloc"] }
+axum = { version = "0.8.9", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
+base64 = "0.23.1"
+bytes = "1.12.1"
+fastrand = "2.5.0"
+httpdate = "1.0.3"
+jiff = { version = "0.2.38", features = ["serde"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["http2", "charset", "system-proxy"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "sync", "time"] }
+tracing = "0.1.44"
+url = "2.5.8"
+
+[dev-dependencies]
+anyhow = "1.0.104"
+# The crate's own tests use the emulator.
+scaleset = { path = ".", features = ["testing"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+wiremock = "0.6.5"
+
+[[bin]]
+name = "scaleset-emulator"
+required-features = ["testing"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
