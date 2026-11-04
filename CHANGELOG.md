@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/imumesh18/scaleset/compare/v0.1.0...v0.2.0) - 2026-11-04
+
+### Added
+
+- [**breaking**] apply Rust best practices across the crate ([#5](https://github.com/imumesh18/scaleset/pull/5))
+
 ## [0.1.0](https://github.com/imumesh18/scaleset/releases/tag/v0.1.0)
 
 First release.
