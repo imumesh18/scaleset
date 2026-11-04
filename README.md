@@ -4,7 +4,7 @@
 [![crates.io](https://shieldcn.dev/crates/scaleset.svg?logo=rust)](https://crates.io/crates/scaleset)
 [![downloads](https://shieldcn.dev/crates/d/scaleset.svg)](https://crates.io/crates/scaleset)
 [![docs.rs](https://shieldcn.dev/badge/docs-docs.rs-blue.svg?logo=docsdotrs)](https://docs.rs/scaleset)
-[![MSRV](https://shieldcn.dev/badge/MSRV-1.88-orange.svg?logo=rust)](#minimum-supported-rust-version)
+[![MSRV](https://shieldcn.dev/badge/MSRV-1.91-orange.svg?logo=rust)](#minimum-supported-rust-version)
 [![license](https://shieldcn.dev/github/license/imumesh18/scaleset.svg)](LICENSE)
 [![stars](https://shieldcn.dev/github/stars/imumesh18/scaleset.svg)](https://github.com/imumesh18/scaleset/stargazers)
 
@@ -69,10 +69,12 @@ impl Scaler for Autoscaler {
         // Runners are ephemeral: each one leaves when its job completes.
         if let Some(message) = event.message() {
             for job in message.jobs_completed() {
-                self.runners.remove(&job.runner_name);
+                if let Some(name) = &job.runner_name {
+                    self.runners.remove(name);
+                }
             }
         }
-        let wanted = event.statistics().total_assigned_jobs as usize;
+        let wanted = usize::try_from(event.statistics().total_assigned_jobs)?;
         while self.runners.len() < wanted {
             let setting = JitRunnerSetting::unique("runner");
             let jit = self.client.generate_jit_config(self.scale_set_id, &setting).await?;
@@ -258,7 +260,7 @@ fn build() -> Result<Client, Box<dyn std::error::Error>> {
 - `max_elapsed` caps the time spent on a request. Rather than sleeping into
   that deadline, the SDK returns the last response.
 - Credentials only travel over HTTPS. For tests and isolated GHES labs,
-  `ClientBuilder::allow_http(true)` permits plain HTTP; github.com and
+  `ClientBuilder::allow_http()` permits plain HTTP; github.com and
   GHE.com always need HTTPS.
 
 Change the policy for some calls only, for example to requeue on a rate
@@ -346,7 +348,7 @@ scaleset-emulator --port 4100 --long-poll-ms 2000
 
 ## Minimum supported Rust version
 
-Rust 1.88. Raising it is a minor-version change.
+Rust 1.91. Raising it is a minor-version change.
 
 ## Contributing
 

@@ -1,6 +1,6 @@
 //! Following individual jobs through their messages.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::types::{JobMessage, JobRequestId, RunnerId, ScaleSetMessage};
 
@@ -47,7 +47,7 @@ pub enum JobStatus {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct JobTracker {
-    jobs: HashMap<JobRequestId, JobStatus>,
+    jobs: BTreeMap<JobRequestId, JobStatus>,
 }
 
 impl JobTracker {
@@ -92,7 +92,17 @@ impl JobTracker {
         self.busy_runners().any(|name| name == runner_name)
     }
 
-    /// Names of the runners running a job.
+    /// Forgets the jobs running on the named runner, for a runner you know
+    /// is gone. Use it when a runner exits without a `JobCompleted` message
+    /// reaching the tracker, for example after the session was replaced, so
+    /// the runner does not look busy forever.
+    pub fn forget_runner(&mut self, runner_name: &str) {
+        self.jobs.retain(|_, status| {
+            !matches!(status, JobStatus::Running { runner_name: name, .. } if name == runner_name)
+        });
+    }
+
+    /// Names of the runners running a job, ordered by job request ID.
     pub fn busy_runners(&self) -> impl Iterator<Item = &str> {
         self.jobs.values().filter_map(|status| match status {
             JobStatus::Running { runner_name, .. } => Some(runner_name.as_str()),
@@ -187,5 +197,14 @@ mod tests {
             JobMessage::Assigned(JobAssigned { job: info(7) }),
         ]));
         assert_eq!(tracker.running(), 1);
+    }
+
+    #[test]
+    fn forgets_a_runner() {
+        let mut tracker = JobTracker::new();
+        tracker.observe(&message(vec![started(1, "r1"), started(2, "r2")]));
+        tracker.forget_runner("r1");
+        assert!(!tracker.is_runner_busy("r1"));
+        assert_eq!(tracker.busy_runners().collect::<Vec<_>>(), ["r2"]);
     }
 }

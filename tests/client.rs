@@ -1,3 +1,5 @@
+//! Wire tests for `Client`: the exact requests it sends and how it reads responses, against wiremock.
+
 mod fixtures;
 
 use std::time::Duration;
@@ -93,7 +95,7 @@ async fn github_app_token_exchange() {
         fake.config_url(),
         Credentials::github_app("Iv1.app", 42, &pem).unwrap(),
     )
-    .allow_http(true)
+    .allow_http()
     .build()
     .unwrap();
     client
@@ -136,7 +138,7 @@ async fn create_scale_set_sends_default_label() {
         .create_runner_scale_set(
             &RunnerScaleSetSpec::new("set")
                 .runner_group_id(RunnerGroupId::DEFAULT)
-                .disable_update(true),
+                .disable_update(),
         )
         .await
         .unwrap();
@@ -328,9 +330,7 @@ async fn update_sends_only_what_changed() {
     fake.client()
         .update_runner_scale_set(
             ScaleSetId(4),
-            &RunnerScaleSetSpec::default()
-                .label("gpu")
-                .disable_update(false),
+            &RunnerScaleSetSpec::default().label("gpu").enable_update(),
         )
         .await
         .unwrap();
@@ -385,7 +385,7 @@ fn credentials_need_https() {
     };
     assert!(insecure("http://ghes.example.com/org"));
     // github.com and GHE.com never accept HTTP, even when allowed.
-    let allowed = |url: &str| Client::builder(url, pat()).allow_http(true).build();
+    let allowed = |url: &str| Client::builder(url, pat()).allow_http().build();
     assert!(matches!(
         allowed("http://github.com/org"),
         Err(Error::InsecureUrl { .. })
@@ -434,4 +434,21 @@ fn rejects_bad_config_url() {
     .build()
     .unwrap_err();
     assert!(matches!(err, Error::InvalidConfigUrl { .. }));
+}
+
+#[test]
+fn futures_are_send() {
+    fn assert_send<T: Send>(_: T) {}
+    let client = Client::builder(
+        "https://github.com/org",
+        Credentials::personal_access_token(PAT).unwrap(),
+    )
+    .build()
+    .unwrap();
+    // Built but never polled, so nothing is sent.
+    assert_send(client.get_runner_scale_set_by_id(ScaleSetId(1)));
+    assert_send(client.create_runner_scale_set(&RunnerScaleSetSpec::new("set")));
+    assert_send(client.generate_jit_config(ScaleSetId(1), &JitRunnerSetting::unique("r")));
+    assert_send(client.remove_runner(RunnerId(1)));
+    assert_send(client.create_message_session(ScaleSetId(1), "owner"));
 }

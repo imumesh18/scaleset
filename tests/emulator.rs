@@ -28,7 +28,7 @@ async fn scale_set(client: &Client, name: &str) -> ScaleSetId {
     client
         .create_runner_scale_set(&RunnerScaleSetSpec::new(name))
         .await
-        .unwrap()
+        .expect("scale set is created")
         .id
 }
 
@@ -465,7 +465,7 @@ async fn github_app_works_only_for_its_installation() {
         emu.config_url(),
         Credentials::github_app("Iv1.emulated", 42, &pem).unwrap(),
     )
-    .allow_http(true)
+    .allow_http()
     .build()
     .unwrap();
     scale_set(&client, "set").await;
@@ -475,7 +475,7 @@ async fn github_app_works_only_for_its_installation() {
         emu.config_url(),
         Credentials::github_app("Iv1.emulated", 7, &pem).unwrap(),
     )
-    .allow_http(true)
+    .allow_http()
     .build()
     .unwrap();
     let err = wrong
@@ -492,7 +492,7 @@ async fn bad_pat_is_rejected() {
         emu.config_url(),
         Credentials::personal_access_token("ghp_wrong").unwrap(),
     )
-    .allow_http(true)
+    .allow_http()
     .build()
     .unwrap();
     let err = client

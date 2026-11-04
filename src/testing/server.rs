@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::state::{ScaleSetBody, ServiceError, ServiceResult};
 use super::{Endpoint, Fault, FaultResponse, Inner, RecordedRequest};
+use crate::error::RateLimitKind;
 use crate::types::{
     JobRequestId, MessageId, RunnerGroupId, RunnerId, ScaleSetId, SessionId, SessionInfo,
 };
@@ -139,9 +140,8 @@ impl Route {
             Self::Runners | Self::Runner(_) => Endpoint::Runners,
             Self::Queue(..) => Endpoint::GetMessage,
             Self::QueueMessage(..) if method == Method::DELETE => Endpoint::DeleteMessage,
-            Self::QueueMessage(..) => Endpoint::Unknown,
             Self::Control(_) => Endpoint::Control,
-            Self::Unknown => Endpoint::Unknown,
+            Self::QueueMessage(..) | Self::Unknown => Endpoint::Unknown,
         }
     }
 
@@ -284,10 +284,11 @@ fn fault_response(fault: &FaultResponse) -> Response {
         FaultResponse::RateLimit {
             status,
             retry_after_secs,
-            primary,
+            limit,
         } => {
+            let primary = *limit == RateLimitKind::Primary;
             let status = StatusCode::from_u16(*status).unwrap_or(StatusCode::TOO_MANY_REQUESTS);
-            let message = if *primary {
+            let message = if primary {
                 "API rate limit exceeded"
             } else {
                 "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."
@@ -297,7 +298,7 @@ fn fault_response(fault: &FaultResponse) -> Response {
             if let Some(secs) = retry_after_secs {
                 headers.insert(header::RETRY_AFTER, HeaderValue::from(*secs));
             }
-            if *primary {
+            if primary {
                 headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
             }
             response
@@ -317,7 +318,7 @@ async fn dispatch(inner: &Arc<Inner>, req: Req) -> Response {
     };
     match result {
         Ok(response) => response,
-        Err(e) => error_response(&req.route, e),
+        Err(e) => error_response(&req.route, &e),
     }
 }
 
@@ -332,7 +333,7 @@ fn actions_preconditions(inner: &Inner, req: &Req) -> ServiceResult<()> {
     inner.lock().check_admin(req.bearer())
 }
 
-fn error_response(route: &Route, e: ServiceError) -> Response {
+fn error_response(route: &Route, e: &ServiceError) -> Response {
     let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = if route.is_actions() || e.type_name.is_some() {
         json!({ "typeName": e.type_name.unwrap_or("VssServiceException"), "message": e.message })
@@ -342,10 +343,18 @@ fn error_response(route: &Route, e: ServiceError) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "route arms return it directly, next to arms that fail"
+)]
 fn ok(status: StatusCode, body: Value) -> ServiceResult<Response> {
     Ok((status, axum::Json(body)).into_response())
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "route arms return it directly, next to arms that fail"
+)]
 fn no_content() -> ServiceResult<Response> {
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -358,7 +367,7 @@ fn not_allowed() -> ServiceResult<Response> {
     Err(ServiceError::new(405, "method not allowed"))
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines, reason = "one flat match over every route")]
 async fn route(inner: &Arc<Inner>, req: &Req) -> ServiceResult<Response> {
     let m = &req.method;
     match &req.route {

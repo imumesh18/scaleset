@@ -10,7 +10,7 @@ put together and why; changes should fit it, or update it.
 
 ## Development
 
-You need Rust 1.88 or later. The usual commands:
+You need Rust 1.91 or later. The usual commands:
 
 ```sh
 cargo fmt --all

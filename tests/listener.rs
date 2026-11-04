@@ -4,10 +4,11 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use scaleset::listener::{Event, JobTracker, Listener, MaxRunners, Scaler};
+use scaleset::listener::{Event, JobTracker, Listener, MaxRunners, Scaler, Subscription};
 use scaleset::testing::{Emulator, Endpoint, Fault, JobState};
 use scaleset::{
-    BoxError, Client, JitRunnerSetting, RunnerScaleSetSpec, ScaleSetId, ScaleSetStatistics,
+    BoxError, Client, JitRunnerSetting, RunnerScaleSetSpec, ScaleSetId, ScaleSetMessage,
+    ScaleSetStatistics,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -27,7 +28,7 @@ async fn setup(emu: &Emulator) -> (Client, ScaleSetId) {
     let id = client
         .create_runner_scale_set(&RunnerScaleSetSpec::new("linux"))
         .await
-        .unwrap()
+        .expect("scale set is created")
         .id;
     (client, id)
 }
@@ -60,8 +61,8 @@ impl<S: Scaler + 'static> Running<S> {
 
     async fn stop(self) -> S {
         let _ = self.stop.send(());
-        let (result, scaler) = self.task.await.unwrap();
-        result.unwrap();
+        let (result, scaler) = self.task.await.expect("listener task did not panic");
+        result.expect("listener exits cleanly");
         scaler
     }
 }
@@ -92,10 +93,12 @@ impl Scaler for Autoscaler {
         if let Some(message) = event.message() {
             self.tracker.observe(message);
             for job in message.jobs_completed() {
-                self.runners.remove(&job.runner_name);
+                if let Some(name) = &job.runner_name {
+                    self.runners.remove(name);
+                }
             }
         }
-        let wanted = event.statistics().total_assigned_jobs as usize;
+        let wanted = usize::try_from(event.statistics().total_assigned_jobs)?;
         while self.runners.len() < wanted {
             let setting = JitRunnerSetting::unique("runner");
             self.client
@@ -178,7 +181,7 @@ impl Scaler for Flaky {
             Event::Message { message, .. } => format!("message:{}", message.id),
             _ => "idle".to_owned(),
         };
-        self.seen.lock().unwrap().push(label);
+        self.seen.lock().expect("lock poisoned").push(label);
         if event.message().is_some() && self.failures > 0 {
             self.failures -= 1;
             return Err("provisioning failed".into());
@@ -579,5 +582,81 @@ async fn subscription_is_cancel_safe() {
             .runner_request_id,
         job
     );
+    session.close().await.unwrap();
+}
+
+/// Pulls and acknowledges messages, passing each to `f`, until `f` returns
+/// `true`.
+async fn pull_until(events: &mut Subscription, mut f: impl FnMut(&ScaleSetMessage) -> bool) {
+    let pull = async {
+        loop {
+            let done = events
+                .next()
+                .await
+                .expect("poll succeeds")
+                .message()
+                .map(&mut f);
+            events.ack().await.expect("ack succeeds");
+            if done == Some(true) {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), pull)
+        .await
+        .expect("condition not met in time");
+}
+
+#[tokio::test]
+async fn tracker_forgets_a_runner_whose_completion_was_lost() {
+    let emu = emulator().await;
+    let (client, id) = setup(&emu).await;
+    let session = client.create_message_session(id, "pull").await.unwrap();
+    let mut events = session.subscribe(5);
+    let mut tracker = JobTracker::new();
+
+    let setting = JitRunnerSetting::unique("runner");
+    client.generate_jit_config(id, &setting).await.unwrap();
+    let job = emu.queue_job(id, ["linux"]);
+    pull_until(&mut events, |m| m.jobs_available().next().is_some()).await;
+    session.acquire_jobs(&[job]).await.unwrap();
+    emu.start_job(job, Some(&setting.name));
+    pull_until(&mut events, |m| {
+        tracker.observe(m);
+        tracker.is_runner_busy(&setting.name)
+    })
+    .await;
+
+    // The session goes away before the job's completion reaches the
+    // tracker, and the runner is known to be gone.
+    session.close().await.unwrap();
+    emu.complete_job(job, None);
+    tracker.forget_runner(&setting.name);
+    assert!(!tracker.is_runner_busy(&setting.name));
+    assert_eq!(tracker.running(), 0);
+}
+
+#[tokio::test]
+async fn canceled_job_reports_no_runner() {
+    let emu = emulator().await;
+    let (client, id) = setup(&emu).await;
+    let session = client.create_message_session(id, "pull").await.unwrap();
+    let mut events = session.subscribe(5);
+
+    let job = emu.queue_job(id, ["linux"]);
+    pull_until(&mut events, |m| m.jobs_available().next().is_some()).await;
+    session.acquire_jobs(&[job]).await.unwrap();
+    emu.complete_job(job, None);
+
+    let mut completed = None;
+    pull_until(&mut events, |m| {
+        completed = m.jobs_completed().next().cloned();
+        completed.is_some()
+    })
+    .await;
+    let completed = completed.unwrap();
+    assert_eq!(completed.job.runner_request_id, job);
+    assert_eq!(completed.result, "canceled");
+    assert_eq!((completed.runner_id, completed.runner_name), (None, None));
     session.close().await.unwrap();
 }

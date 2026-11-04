@@ -10,33 +10,33 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::fast_retries;
 
-pub const PAT: &str = "ghp_test";
-pub const REGISTRATION_TOKEN: &str = "reg-token";
+pub(crate) const PAT: &str = "ghp_test";
+pub(crate) const REGISTRATION_TOKEN: &str = "reg-token";
 
 /// An unsigned JWT that expires `ttl` from now.
-pub fn admin_jwt(ttl: Duration) -> String {
+pub(crate) fn admin_jwt(ttl: Duration) -> String {
     let exp = (SystemTime::now() + ttl)
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("now is after the epoch")
         .as_secs();
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
     let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
     format!("{header}.{payload}.sig")
 }
 
-pub struct Fake {
-    pub server: MockServer,
-    pub admin_token: String,
+pub(crate) struct Fake {
+    pub(crate) server: MockServer,
+    pub(crate) admin_token: String,
 }
 
 impl Fake {
     /// A server that answers the token exchange for org `org`, issuing an
     /// admin token valid for an hour.
-    pub async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         Self::start_with_ttl(Duration::from_secs(3600)).await
     }
 
-    pub async fn start_with_ttl(ttl: Duration) -> Self {
+    pub(crate) async fn start_with_ttl(ttl: Duration) -> Self {
         let server = MockServer::start().await;
         let admin_token = admin_jwt(ttl);
 
@@ -70,23 +70,23 @@ impl Fake {
         }
     }
 
-    pub fn config_url(&self) -> String {
+    pub(crate) fn config_url(&self) -> String {
         format!("{}/org", self.server.uri())
     }
 
-    pub fn admin_auth(&self) -> String {
+    pub(crate) fn admin_auth(&self) -> String {
         format!("Bearer {}", self.admin_token)
     }
 
     /// A PAT client with fast retries.
-    pub fn client(&self) -> Client {
+    pub(crate) fn client(&self) -> Client {
         Client::builder(
             self.config_url(),
-            Credentials::personal_access_token(PAT).unwrap(),
+            Credentials::personal_access_token(PAT).expect("non-empty PAT"),
         )
         .retry_policy(fast_retries())
-        .allow_http(true)
+        .allow_http()
         .build()
-        .unwrap()
+        .expect("valid fake client")
     }
 }

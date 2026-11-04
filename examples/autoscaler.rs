@@ -50,10 +50,12 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let client = Client::builder(&config.url, config.credentials()?)
-        .system_info(SystemInfo::new("scaleset-example").subsystem("autoscaler"))
-        .allow_http(env::var("SCALESET_ALLOW_HTTP").is_ok_and(|v| v == "1"))
-        .build()?;
+    let mut builder = Client::builder(&config.url, credentials()?)
+        .system_info(SystemInfo::new("scaleset-example").subsystem("autoscaler"));
+    if env::var("SCALESET_ALLOW_HTTP").is_ok_and(|v| v == "1") {
+        builder = builder.allow_http();
+    }
+    let client = builder.build()?;
 
     let runner_group_id = match config.runner_group.as_str() {
         DEFAULT_RUNNER_GROUP => RunnerGroupId::DEFAULT,
@@ -127,9 +129,10 @@ impl Scaler for ProcessScaler {
 
     async fn scale(&mut self, event: Event<'_>) -> Result<()> {
         self.reap().await;
-        let wanted = self
-            .max_runners
-            .min(self.min_runners + event.statistics().total_assigned_jobs);
+        let wanted = self.max_runners.min(
+            self.min_runners
+                .saturating_add(event.statistics().total_assigned_jobs),
+        );
         let wanted = usize::try_from(wanted)?;
         if self.runners.len() < wanted {
             tracing::info!(current = self.runners.len(), wanted, "scaling up");
@@ -184,13 +187,12 @@ impl ProcessScaler {
             signal_group(&runner.child, "TERM").await;
         }
         for (name, Runner { id, mut child }) in runners {
-            let status = match tokio::time::timeout(STOP_GRACE, child.wait()).await {
-                Ok(status) => status,
-                Err(_) => {
-                    tracing::warn!(runner = %name, "runner ignored SIGTERM; killing it");
-                    signal_group(&child, "KILL").await;
-                    child.wait().await
-                }
+            let status = if let Ok(status) = tokio::time::timeout(STOP_GRACE, child.wait()).await {
+                status
+            } else {
+                tracing::warn!(runner = %name, "runner ignored SIGTERM; killing it");
+                signal_group(&child, "KILL").await;
+                child.wait().await
             };
             match status {
                 Ok(status) => tracing::info!(runner = %name, %status, "runner stopped"),
@@ -209,7 +211,8 @@ impl ProcessScaler {
             .generate_jit_config(self.scale_set_id, &setting)
             .await?;
         let name = setting.name;
-        let child = Command::new("sh")
+        let id = jit.runner.as_ref().map(|r| r.id);
+        let spawned = Command::new("sh")
             .arg("-c")
             .arg(&self.command)
             .env(
@@ -220,10 +223,18 @@ impl ProcessScaler {
             // command started (a pipeline, `docker run`, ...).
             .process_group(0)
             .kill_on_drop(true)
-            .spawn()
-            .context("failed to start the runner")?;
+            .spawn();
+        let child = match spawned {
+            Ok(child) => child,
+            Err(e) => {
+                // The runner is registered but will never run; remove it.
+                if let Some(id) = id {
+                    self.remove_registration(id).await;
+                }
+                return Err(e).context("failed to start the runner");
+            }
+        };
         tracing::info!(runner = %name, "runner started");
-        let id = jit.runner.map(|r| r.id);
         self.runners.insert(name, Runner { id, child });
         Ok(())
     }
@@ -266,19 +277,20 @@ impl Config {
         }
         Ok(config)
     }
+}
 
-    fn credentials(&self) -> Result<Credentials> {
-        if let Ok(client_id) = env::var("GITHUB_APP_CLIENT_ID") {
-            let installation_id = required("GITHUB_APP_INSTALLATION_ID")?
-                .parse()
-                .context("GITHUB_APP_INSTALLATION_ID must be a number")?;
-            let path = required("GITHUB_APP_PRIVATE_KEY_PATH")?;
-            let pem = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
-            return Ok(Credentials::github_app(client_id, installation_id, &pem)?);
-        }
-        let token = required("GITHUB_TOKEN").context("or set the GITHUB_APP_* variables")?;
-        Ok(Credentials::personal_access_token(token)?)
+/// Reads GitHub App or PAT credentials from the environment.
+fn credentials() -> Result<Credentials> {
+    if let Ok(client_id) = env::var("GITHUB_APP_CLIENT_ID") {
+        let installation_id = required("GITHUB_APP_INSTALLATION_ID")?
+            .parse()
+            .context("GITHUB_APP_INSTALLATION_ID must be a number")?;
+        let path = required("GITHUB_APP_PRIVATE_KEY_PATH")?;
+        let pem = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
+        return Ok(Credentials::github_app(client_id, installation_id, &pem)?);
     }
+    let token = required("GITHUB_TOKEN").context("or set the GITHUB_APP_* variables")?;
+    Ok(Credentials::personal_access_token(token)?)
 }
 
 fn required(name: &str) -> Result<String> {

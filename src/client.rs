@@ -22,12 +22,12 @@ use crate::types::{
 };
 
 /// Bounds a single HTTP attempt on the default HTTP client.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// How long one message poll attempt may take. The service holds an idle
 /// poll for about 50 seconds; this leaves room above that. Each retry gets a
 /// new window.
-pub const MESSAGE_POLL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+pub const MESSAGE_POLL_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Header carrying the scale set's capacity on message polls.
 pub(crate) const HEADER_SCALE_SET_MAX_CAPACITY: &str = "X-ScaleSetMaxCapacity";
@@ -189,16 +189,21 @@ impl ClientBuilder {
     /// returns. Credentials then cross the network unencrypted, so use it
     /// only for tests, such as with [`testing::Emulator`](crate::testing),
     /// and isolated labs. github.com and GHE.com always need HTTPS.
-    pub fn allow_http(mut self, allow: bool) -> Self {
-        self.allow_http = allow;
+    pub fn allow_http(mut self) -> Self {
+        self.allow_http = true;
         self
     }
 
     /// Builds the client. No request is sent until the first call.
     ///
-    /// Fails with [`Error::InsecureUrl`] for an `http://` URL, unless
+    /// # Errors
+    ///
+    /// Fails with [`Error::InvalidConfigUrl`] if the config URL cannot be
+    /// parsed, and with [`Error::InsecureUrl`] for an `http://` URL unless
     /// [`allow_http`](Self::allow_http) is set and the host is not github.com
-    /// or GHE.com.
+    /// or GHE.com. Without a custom [`http_client`](Self::http_client), it
+    /// fails with [`Error::HttpClient`] if the default client cannot be
+    /// built.
     pub fn build(self) -> Result<Client> {
         let config = GitHubConfigUrl::parse(&self.config_url)?;
         let allow_http = self.allow_http && !config.requires_https();
@@ -245,6 +250,22 @@ impl ClientBuilder {
 ///     .await?;
 /// # Ok(()) }
 /// ```
+///
+/// # Errors
+///
+/// Every call can fail with:
+///
+/// - [`Error::Api`] when the service rejects the request. Predicates such as
+///   [`Error::is_not_found`] and [`Error::is_conflict`] classify it.
+/// - [`Error::RateLimited`] when the service rate limits the request and
+///   the [`RetryPolicy`] gives up.
+/// - [`Error::Transport`] or [`Error::MaxElapsedExceeded`] when the request
+///   cannot be sent or runs out of its retry budget.
+/// - [`Error::Decode`] when a successful response cannot be read.
+/// - [`Error::Jwt`] when a GitHub App [`JwtProvider`](crate::JwtProvider)
+///   fails while the admin token is renewed.
+/// - [`Error::InsecureUrl`] when the service returns a plain HTTP URL and
+///   HTTP is not allowed.
 #[derive(Clone)]
 pub struct Client {
     shared: Arc<Shared>,
@@ -354,11 +375,21 @@ impl Client {
     }
 
     /// The current system info.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a thread panicked while holding the system info lock. The
+    /// crate never does.
     pub fn system_info(&self) -> SystemInfo {
         self.shared.system.read().expect("lock poisoned").0.clone()
     }
 
     /// Replaces the system info, for this client and all its clones.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a thread panicked while holding the system info lock. The
+    /// crate never does.
     pub fn set_system_info(&self, info: SystemInfo) {
         let ua = info.user_agent();
         *self.shared.system.write().expect("lock poisoned") = (info, ua);
@@ -381,6 +412,11 @@ impl Client {
     // Scale sets
 
     /// Finds a scale set by name within a runner group.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors), and with [`Error::UnexpectedResponse`] if several scale sets
+    /// share the name.
     pub async fn get_runner_scale_set_by_name(
         &self,
         runner_group_id: RunnerGroupId,
@@ -406,6 +442,10 @@ impl Client {
     }
 
     /// Lists the scale sets in a runner group.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors).
     pub async fn list_runner_scale_sets(
         &self,
         runner_group_id: RunnerGroupId,
@@ -425,6 +465,10 @@ impl Client {
     }
 
     /// Gets a scale set by ID.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors).
     pub async fn get_runner_scale_set_by_id(&self, id: ScaleSetId) -> Result<RunnerScaleSet> {
         let path = format!("{SCALE_SET_ENDPOINT}/{id}");
 
@@ -438,11 +482,15 @@ impl Client {
     ///
     /// Without labels, the name becomes the only label. Labels without a
     /// type get type `System`.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors), and with [`Error::InvalidInput`] if `spec` has no name.
     pub async fn create_runner_scale_set(
         &self,
         spec: &RunnerScaleSetSpec,
     ) -> Result<RunnerScaleSet> {
-        let spec = spec.normalized(true).map_err(Error::InvalidInput)?;
+        let spec = spec.for_create().map_err(Error::InvalidInput)?;
         let body = to_json(&spec)?;
 
         self.actions(
@@ -459,13 +507,16 @@ impl Client {
 
     /// Updates a scale set. Fields left `None` or empty in `spec` are not
     /// sent.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors).
     pub async fn update_runner_scale_set(
         &self,
         id: ScaleSetId,
         spec: &RunnerScaleSetSpec,
     ) -> Result<RunnerScaleSet> {
-        let spec = spec.normalized(false).map_err(Error::InvalidInput)?;
-        let body = to_json(&spec)?;
+        let body = to_json(&spec.for_update())?;
         let path = format!("{SCALE_SET_ENDPOINT}/{id}");
 
         self.actions(Method::PATCH, &path, &[], Some(body), &self.retry)
@@ -475,6 +526,10 @@ impl Client {
     }
 
     /// Deletes a scale set.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors).
     pub async fn delete_runner_scale_set(&self, id: ScaleSetId) -> Result<()> {
         let path = format!("{SCALE_SET_ENDPOINT}/{id}");
 
@@ -485,6 +540,11 @@ impl Client {
     }
 
     /// Finds a runner group by name.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors), and with [`Error::UnexpectedResponse`] if several groups share
+    /// the name.
     pub async fn get_runner_group_by_name(&self, name: &str) -> Result<Option<RunnerGroup>> {
         let list: ListResponse<RunnerGroup> = self
             .actions(
@@ -515,6 +575,10 @@ impl Client {
     /// cannot be recovered, so remove the runner
     /// ([`get_runner_by_name`](Self::get_runner_by_name), then
     /// [`remove_runner`](Self::remove_runner)) or pick a new name.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors).
     pub async fn generate_jit_config(
         &self,
         scale_set_id: ScaleSetId,
@@ -536,6 +600,10 @@ impl Client {
 
     /// Gets a runner by ID. A missing runner is an error for which
     /// [`Error::is_not_found`] or [`Error::is_runner_not_found`] holds.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors).
     pub async fn get_runner(&self, id: RunnerId) -> Result<RunnerReference> {
         let path = format!("{RUNNER_ENDPOINT}/{id}");
 
@@ -546,6 +614,11 @@ impl Client {
     }
 
     /// Finds a runner by name.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors), and with [`Error::UnexpectedResponse`] if several runners share
+    /// the name.
     pub async fn get_runner_by_name(&self, name: &str) -> Result<Option<RunnerReference>> {
         let list: ListResponse<RunnerReference> = self
             .actions(
@@ -564,6 +637,11 @@ impl Client {
     }
 
     /// Removes a runner.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors). [`Error::is_job_still_running`] holds while
+    /// the runner is busy.
     pub async fn remove_runner(&self, id: RunnerId) -> Result<()> {
         let path = format!("{RUNNER_ENDPOINT}/{id}");
 
@@ -581,6 +659,11 @@ impl Client {
     ///
     /// Call [`MessageSession::close`] when done, so another listener can
     /// take over without waiting for the session to time out.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [errors](Client#errors). [`Error::is_conflict`] holds when another
+    /// session is open.
     pub async fn create_message_session(
         &self,
         scale_set_id: ScaleSetId,
@@ -612,7 +695,11 @@ impl Client {
             return Ok(resp);
         }
 
-        tracing::info!(url = %resp.url, "admin token rejected, refreshing it");
+        // Only the path: queries can carry runner and scale set names.
+        let rejected = Url::parse(&resp.url)
+            .map(|u| u.path().to_owned())
+            .unwrap_or_default();
+        tracing::info!(path = %rejected, "admin token rejected, refreshing it");
         self.invalidate_admin_token(&token);
         let token = self.admin_token().await?;
         let req = self.actions_request_with(&token, method, path, query, body)?;
@@ -841,6 +928,10 @@ fn actions_url(base: &str, path: &str, query: &[(&str, String)]) -> Result<Url> 
     Ok(url)
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "private helper; both callers are in this file"
+)]
 fn require_https(url: &Url, allow_http: bool) -> Result<()> {
     match url.scheme() {
         "https" => Ok(()),

@@ -49,7 +49,7 @@ impl fmt::Debug for MessageSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MessageSession")
             .field("scale_set_id", &self.inner.scale_set_id)
-            .field("info", &self.info())
+            .field("info", &self.current())
             .finish()
     }
 }
@@ -97,7 +97,17 @@ impl MessageSession {
     }
 
     /// The current session, as last created or refreshed.
-    pub fn info(&self) -> Arc<SessionInfo> {
+    ///
+    /// # Panics
+    ///
+    /// Panics if a thread panicked while holding the session lock. The crate
+    /// never does.
+    pub fn info(&self) -> SessionInfo {
+        SessionInfo::clone(&self.current())
+    }
+
+    /// The current session, shared rather than copied.
+    pub(crate) fn current(&self) -> Arc<SessionInfo> {
         Arc::clone(&self.inner.info.read().expect("lock poisoned"))
     }
 
@@ -124,6 +134,11 @@ impl MessageSession {
     ///
     /// Each attempt may take up to [`MESSAGE_POLL_TIMEOUT`], whatever the
     /// HTTP client's own timeout, and each retry gets a new window.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [`Client`'s errors](crate::Client#errors).
+    /// An expired session is refreshed and the call retried once first.
     pub async fn get_message(
         &self,
         last_message_id: Option<MessageId>,
@@ -168,7 +183,7 @@ impl MessageSession {
             StatusCode::ACCEPTED => Ok(None),
             StatusCode::OK => {
                 let raw: RawMessage = resp.json()?;
-                Ok(Some(ScaleSetMessage::from_raw(raw)))
+                Ok(Some(ScaleSetMessage::from_raw(&raw)))
             }
             _ => Err(queue_error(resp)),
         }
@@ -177,6 +192,10 @@ impl MessageSession {
     /// Acknowledges a message, so it is not delivered again. Call it after
     /// the message is handled. Acknowledging a message that is already gone
     /// succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [`Client`'s errors](crate::Client#errors).
     pub async fn delete_message(&self, message_id: MessageId) -> Result<()> {
         self.with_refresh(|info| self.delete_message_once(info, message_id))
             .await
@@ -219,6 +238,10 @@ impl MessageSession {
     ///
     /// A job you do not acquire stays unassigned. Acquiring a job twice is
     /// harmless.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [`Client`'s errors](crate::Client#errors).
     pub async fn acquire_jobs(&self, request_ids: &[JobRequestId]) -> Result<Vec<JobRequestId>> {
         self.with_refresh(|info| self.acquire_jobs_once(info, request_ids))
             .await
@@ -260,8 +283,12 @@ impl MessageSession {
     }
 
     /// Deletes the session.
+    ///
+    /// # Errors
+    ///
+    /// Fails as described under [`Client`'s errors](crate::Client#errors).
     pub async fn close(&self) -> Result<()> {
-        let info = self.info();
+        let info = self.current();
         let path = format!(
             "{SCALE_SET_ENDPOINT}/{}/sessions/{}",
             self.inner.scale_set_id, info.session_id
@@ -300,12 +327,12 @@ impl MessageSession {
         F: Fn(Arc<SessionInfo>) -> Fut + 'a,
         Fut: Future<Output = Result<T>> + 'a,
     {
-        let info = self.info();
+        let info = self.current();
         match op(Arc::clone(&info)).await {
             Err(e) if e.is_message_queue_token_expired() => {
                 tracing::debug!(session_id = %info.session_id, "message queue token expired, refreshing session");
                 self.refresh(&info).await?;
-                op(self.info()).await
+                op(self.current()).await
             }
             result => result,
         }
@@ -314,7 +341,7 @@ impl MessageSession {
     /// Refreshes the session, unless another task already replaced `expired`.
     async fn refresh(&self, expired: &SessionInfo) -> Result<()> {
         let _guard = self.inner.refresh.lock().await;
-        let current = self.info();
+        let current = self.current();
         if current.session_id != expired.session_id
             || current.message_queue_access_token.expose_secret()
                 != expired.message_queue_access_token.expose_secret()

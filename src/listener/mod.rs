@@ -152,6 +152,15 @@ pub trait Scaler: Send {
     fn scale(&mut self, event: Event<'_>) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
+/// Lets generic code pass a scaler it only borrows.
+impl<S: Scaler> Scaler for &mut S {
+    type Error = S::Error;
+
+    fn scale(&mut self, event: Event<'_>) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        (**self).scale(event)
+    }
+}
+
 /// Publishes the latest statistics, so another task can reconcile at its
 /// own pace. See [Slow provisioning](self#slow-provisioning).
 impl Scaler for tokio::sync::watch::Sender<ScaleSetStatistics> {
@@ -267,8 +276,10 @@ impl Listener {
         }
     }
 
-    /// The session owner name, shown by the service. Defaults to the host
-    /// name.
+    /// The session owner name, shown by the service. Defaults to the
+    /// `HOSTNAME` or `COMPUTERNAME` environment variable, then `scaleset`.
+    /// Shells often do not export `HOSTNAME`, so set it under systemd and
+    /// similar launchers.
     pub fn owner(mut self, owner: impl Into<String>) -> Self {
         self.owner = owner.into();
         self
@@ -282,7 +293,7 @@ impl Listener {
     }
 
     /// The wait after a failure: `min` doubled for each further failure in a
-    /// row, up to `max`. Defaults to 1 s and 60 s.
+    /// row, plus up to 50% at random, up to `max`. Defaults to 1 s and 60 s.
     pub fn backoff(mut self, min: Duration, max: Duration) -> Self {
         self.min_backoff = min;
         self.max_backoff = max.max(min);
@@ -300,6 +311,12 @@ impl Listener {
     /// has to finish so nothing is left behind, acknowledging a handled
     /// message, or closing a session that was being opened, gets up to ten
     /// more seconds. Shutdown returns `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Session`] or [`Error::Scale`] after more than
+    /// [`max_failures`](Self::max_failures) failures in a row, carrying the
+    /// last one.
     pub async fn run<S: Scaler>(
         &self,
         scaler: &mut S,
@@ -329,7 +346,7 @@ impl Listener {
             let exit = match opened {
                 Ok(session) => {
                     conflicts = 0;
-                    tracing::info!(scale_set_id = %self.scale_set_id, session_id = %session.info().session_id, "message session opened");
+                    tracing::info!(scale_set_id = %self.scale_set_id, session_id = %session.current().session_id, "message session opened");
                     let exit = self
                         .serve(&session, scaler, shutdown.as_mut(), &mut failures)
                         .await;
@@ -488,11 +505,13 @@ impl Listener {
     }
 
     /// The backoff after the `n`th failure in a row.
+    /// The wait after `n` failures in a row, with up to 50% added at
+    /// random so standby listeners do not retry in lockstep.
     fn backoff_for(&self, n: u32) -> Duration {
         let factor = 1u32.checked_shl(n.saturating_sub(1)).unwrap_or(u32::MAX);
-        self.min_backoff
-            .saturating_mul(factor)
-            .min(self.max_backoff)
+        let wait = self.min_backoff.saturating_mul(factor);
+        let jitter = wait.mul_f64(fastrand::f64() / 2.0);
+        wait.saturating_add(jitter).min(self.max_backoff)
     }
 
     /// Sleeps for `wait`. Returns `true` if shutdown came first.
@@ -509,7 +528,7 @@ impl Listener {
 async fn close(session: &MessageSession) {
     match tokio::time::timeout(CLOSE_TIMEOUT, session.close()).await {
         Ok(Ok(())) => {
-            tracing::info!(session_id = %session.info().session_id, "message session closed")
+            tracing::info!(session_id = %session.current().session_id, "message session closed");
         }
         Ok(Err(e)) if e.is_not_found() => {}
         Ok(Err(e)) => tracing::warn!(error = %e, "failed to close the message session"),
@@ -522,4 +541,36 @@ fn default_owner() -> String {
         .iter()
         .find_map(|var| std::env::var(var).ok().filter(|v| !v.is_empty()))
         .unwrap_or_else(|| "scaleset".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Credentials;
+
+    #[test]
+    fn backoff_doubles_with_bounded_jitter() {
+        let credentials = Credentials::personal_access_token("token").unwrap();
+        let client = Client::builder("https://github.com/org", credentials)
+            .build()
+            .unwrap();
+        let listener = Listener::new(client, ScaleSetId(1), 1)
+            .backoff(Duration::from_millis(100), Duration::from_millis(1000));
+
+        for _ in 0..1000 {
+            for (failures, base) in [(1, 100), (2, 200), (3, 400), (4, 800)] {
+                let wait = listener.backoff_for(failures);
+                let (min, max) = (
+                    Duration::from_millis(base),
+                    Duration::from_millis(base * 3 / 2).min(Duration::from_millis(1000)),
+                );
+                assert!(
+                    (min..=max).contains(&wait),
+                    "{failures} failures: {wait:?} not in {min:?}..={max:?}"
+                );
+            }
+            // Past the cap, the wait is the cap.
+            assert_eq!(listener.backoff_for(10), Duration::from_millis(1000));
+        }
+    }
 }

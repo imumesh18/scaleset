@@ -33,7 +33,7 @@ pub(crate) struct RawResponse {
 
 impl RawResponse {
     /// Fails unless the status is `expected`.
-    pub fn expect(self, expected: StatusCode) -> Result<Self> {
+    pub(crate) fn expect(self, expected: StatusCode) -> Result<Self> {
         if self.status == expected {
             Ok(self)
         } else {
@@ -42,7 +42,7 @@ impl RawResponse {
     }
 
     /// Fails unless the status is 2xx.
-    pub fn expect_success(self) -> Result<Self> {
+    pub(crate) fn expect_success(self) -> Result<Self> {
         if self.status.is_success() {
             Ok(self)
         } else {
@@ -51,7 +51,7 @@ impl RawResponse {
     }
 
     /// Decodes the body as JSON.
-    pub fn json<T: DeserializeOwned>(&self) -> Result<T> {
+    pub(crate) fn json<T: DeserializeOwned>(&self) -> Result<T> {
         serde_json::from_slice(&self.body).map_err(|e| Error::Decode {
             method: self.method.clone(),
             url: self.url.clone(),
@@ -61,7 +61,7 @@ impl RawResponse {
 
     /// Builds the error for an unsuccessful response. `fallback` is the kind
     /// used when the body does not name a known exception.
-    pub fn into_error(self, fallback: ApiErrorKind) -> Error {
+    pub(crate) fn into_error(self, fallback: ApiErrorKind) -> Error {
         match self.rate_limit(fallback) {
             Some(rl) => Error::from(rl),
             None => Error::from(self.api_error(fallback)),
@@ -130,6 +130,11 @@ fn exception_kind(type_name: &str) -> Option<ApiErrorKind> {
 
 /// Reads an error body: an Actions exception (`{"typeName", "message"}`),
 /// a GitHub error (`{"message"}`), or plain text.
+/// Longest error body kept as the message when it is not a service
+/// exception. Proxies can answer with whole HTML pages, which would flood
+/// logs and error messages.
+const MAX_ERROR_TEXT: usize = 1024;
+
 fn parse_error_body(headers: &HeaderMap, body: &[u8]) -> (Option<ActionsException>, String) {
     let text = String::from_utf8_lossy(body).trim().to_owned();
     if text.is_empty() {
@@ -140,15 +145,24 @@ fn parse_error_body(headers: &HeaderMap, body: &[u8]) -> (Option<ActionsExceptio
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("text/plain"));
     if is_plain {
-        return (None, text);
+        return (None, truncate(text));
     }
     match serde_json::from_str::<ActionsException>(&text) {
         Ok(e) if !e.message.is_empty() || !e.type_name.is_empty() => {
             let message = e.message.clone();
             (Some(e), message)
         }
-        _ => (None, text),
+        _ => (None, truncate(text)),
     }
+}
+
+/// Cuts `text` to [`MAX_ERROR_TEXT`] bytes on a character boundary.
+fn truncate(mut text: String) -> String {
+    if text.len() > MAX_ERROR_TEXT {
+        text.truncate(text.floor_char_boundary(MAX_ERROR_TEXT));
+        text.push('…');
+    }
+    text
 }
 
 /// Classifies a rate-limited response. Returns its kind, the delay the
@@ -491,6 +505,19 @@ mod tests {
         let (e, msg) = parse_error_body(&plain, br#"{"message":"x"}"#);
         assert!(e.is_none());
         assert_eq!(msg, r#"{"message":"x"}"#);
+    }
+
+    #[test]
+    fn long_error_text_is_truncated() {
+        let html = format!("<html>{}</html>", "é".repeat(MAX_ERROR_TEXT));
+        let (e, msg) = parse_error_body(&HeaderMap::new(), html.as_bytes());
+        assert!(e.is_none());
+        assert!(
+            msg.len() <= MAX_ERROR_TEXT + '…'.len_utf8(),
+            "{} bytes",
+            msg.len()
+        );
+        assert!(msg.starts_with("<html>é") && msg.ends_with('…'), "{msg}");
     }
 
     #[test]

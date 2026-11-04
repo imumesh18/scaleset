@@ -1,7 +1,9 @@
+//! Wire tests for `MessageSession`: polling, acknowledging, acquiring jobs and refreshing, against wiremock.
+
 mod fixtures;
 
 use fixtures::server::Fake;
-use scaleset::{ExposeSecret, JobRequestId, MessageId, MessageSession, ScaleSetId};
+use scaleset::{ExposeSecret, JobRequestId, MessageId, MessageSession, RunnerId, ScaleSetId};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, ResponseTemplate};
@@ -47,7 +49,7 @@ async fn session(fake: &Fake) -> MessageSession {
     fake.client()
         .create_message_session(ScaleSetId(5), "host-1")
         .await
-        .unwrap()
+        .expect("session opens")
 }
 
 #[tokio::test]
@@ -162,4 +164,81 @@ async fn acquires_jobs_with_queue_token() {
         .await
         .unwrap();
     assert_eq!(acquired, vec![JobRequestId(1)]);
+}
+
+/// Serves one queue message with `envelope` and expects it acknowledged.
+async fn serve_once(fake: &Fake, envelope: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/queue/msgs"))
+        .and(query_param_is_missing("lastMessageId"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(envelope))
+        .mount(&fake.server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/queue/msgs/7"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&fake.server)
+        .await;
+}
+
+#[tokio::test]
+async fn null_counts_read_as_zero() {
+    let fake = Fake::start().await;
+    let session = session(&fake).await;
+    serve_once(
+        &fake,
+        json!({
+            "messageId": 7,
+            "messageType": "RunnerScaleSetJobMessages",
+            "body": null,
+            "statistics": {"totalAssignedJobs": null, "totalRunningJobs": 2}
+        }),
+    )
+    .await;
+
+    let msg = session.get_message(None, 10).await.unwrap().unwrap();
+    assert_eq!(msg.id, MessageId(7));
+    assert!(msg.jobs.is_empty());
+    let statistics = msg.statistics.unwrap();
+    assert_eq!(statistics.total_assigned_jobs, 0);
+    assert_eq!(statistics.total_running_jobs, 2);
+    session.delete_message(msg.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn canceled_job_has_no_runner() {
+    let fake = Fake::start().await;
+    let session = session(&fake).await;
+    // The service sends Go's zero values when no runner took the job.
+    let jobs = json!([
+        {"messageType": "JobCompleted", "runnerRequestId": 9, "result": "canceled",
+         "runnerId": 0, "runnerName": ""},
+        {"messageType": "JobCompleted", "runnerRequestId": 10, "result": "succeeded",
+         "runnerId": 3, "runnerName": "r3"}
+    ]);
+    serve_once(
+        &fake,
+        json!({
+            "messageId": 7,
+            "messageType": "RunnerScaleSetJobMessages",
+            "body": jobs.to_string(),
+            "statistics": {}
+        }),
+    )
+    .await;
+
+    let msg = session.get_message(None, 10).await.unwrap().unwrap();
+    let completed: Vec<_> = msg
+        .jobs_completed()
+        .map(|j| (j.result.as_str(), j.runner_id, j.runner_name.as_deref()))
+        .collect();
+    assert_eq!(
+        completed,
+        [
+            ("canceled", None, None),
+            ("succeeded", Some(RunnerId(3)), Some("r3")),
+        ]
+    );
+    session.delete_message(msg.id).await.unwrap();
 }

@@ -64,11 +64,20 @@ impl GitHubConfigUrl {
     /// `*.ghe.com` are treated as GitHub-hosted unless the
     /// [`GITHUB_ACTIONS_FORCE_GHES`](FORCE_GHES_ENV) environment variable is
     /// set. Every other host is treated as GitHub Enterprise Server.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::InvalidConfigUrl`] if `input` is not a URL with
+    /// a host and an enterprise, organization or repository path.
     pub fn parse(input: &str) -> Result<Self, Error> {
         let force_ghes = std::env::var_os(FORCE_GHES_ENV).is_some();
         Self::parse_with(input, force_ghes)
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "private seam so tests need not set the environment variable"
+    )]
     fn parse_with(input: &str, force_ghes: bool) -> Result<Self, Error> {
         let raw = input.trim_matches('/').to_owned();
         let invalid = |reason: &str| Error::InvalidConfigUrl {
@@ -153,6 +162,10 @@ impl GitHubConfigUrl {
     ///
     /// For github.com and GHE.com this is `https://api.{host}{path}`; for
     /// GitHub Enterprise Server it is `{scheme}://{host}/api/v3{path}`.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "the base comes from a URL that already parsed, so this cannot panic"
+    )]
     pub fn api_url(&self, path: &str) -> Url {
         let host = self.url.host_str().unwrap_or_default();
         let authority = match self.url.port() {

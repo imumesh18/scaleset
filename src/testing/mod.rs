@@ -72,6 +72,7 @@ use tokio::sync::Notify;
 
 use crate::auth::Credentials;
 use crate::client::{Client, ClientBuilder};
+use crate::error::RateLimitKind;
 use crate::retry::RetryPolicy;
 use crate::types::{JobRequestId, RunnerId, ScaleSetId, ScaleSetStatistics};
 
@@ -167,14 +168,19 @@ impl EmulatorBuilder {
     ///
     /// # Panics
     ///
-    /// If the address cannot be bound; see [`try_start`](Self::try_start).
+    /// Panics if the address cannot be bound; see
+    /// [`try_start`](Self::try_start).
     pub async fn start(self) -> Emulator {
         self.try_start()
             .await
             .expect("failed to start the emulator")
     }
 
-    /// Starts the emulator, failing if the address cannot be bound.
+    /// Starts the emulator.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the address cannot be bound.
     pub async fn try_start(self) -> std::io::Result<Emulator> {
         let addr = self
             .addr
@@ -207,14 +213,14 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
-    pub fn lock(&self) -> MutexGuard<'_, state::State> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, state::State> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Wakes long polls and, when runners are emulated, starts jobs.
-    pub fn on_change(self: &Arc<Self>) {
+    pub(crate) fn on_change(self: &Arc<Self>) {
         // The generation is read under the same lock as the matching, so a
         // reset cannot slip in between and hand old jobs the new generation.
         let (started, duration, generation) = {
@@ -248,7 +254,7 @@ impl Inner {
     }
 
     /// Clears all state, faults and recorded requests.
-    pub fn reset(self: &Arc<Self>) {
+    pub(crate) fn reset(self: &Arc<Self>) {
         {
             let mut state = self.lock();
             self.generation.fetch_add(1, Ordering::SeqCst);
@@ -313,6 +319,11 @@ impl Emulator {
     }
 
     /// Credentials the emulator accepts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the emulator was built with a blank
+    /// [`pat`](EmulatorBuilder::pat).
     pub fn credentials(&self) -> Credentials {
         Credentials::personal_access_token(self.inner.lock().config.pat.clone())
             .expect("non-empty PAT")
@@ -322,7 +333,7 @@ impl Emulator {
     /// milliseconds instead of seconds.
     pub fn client_builder(&self) -> ClientBuilder {
         Client::builder(self.config_url(), self.credentials())
-            .allow_http(true)
+            .allow_http()
             .retry_policy(
                 RetryPolicy::default()
                     .min_wait(Duration::from_millis(1))
@@ -331,6 +342,11 @@ impl Emulator {
     }
 
     /// A client pointed at the emulator. See [`client_builder`](Self::client_builder).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the emulator was built with a blank
+    /// [`pat`](EmulatorBuilder::pat).
     pub fn client(&self) -> Client {
         self.client_builder()
             .build()
@@ -546,8 +562,9 @@ pub enum FaultResponse {
         status: u16,
         /// `Retry-After` in seconds.
         retry_after_secs: Option<u64>,
-        /// Primary (`X-RateLimit-Remaining: 0`) rather than secondary.
-        primary: bool,
+        /// Which limit: primary sends `X-RateLimit-Remaining: 0`, secondary
+        /// a secondary-rate-limit message.
+        limit: RateLimitKind,
     },
     /// Wait, then handle the request normally.
     #[serde(rename_all = "camelCase")]
@@ -569,6 +586,7 @@ pub enum FaultResponse {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Fault {
     /// Requests the fault applies to.
     pub endpoint: Endpoint,
@@ -591,8 +609,8 @@ impl Fault {
             endpoint,
             FaultResponse::RateLimit {
                 status: 403,
-                retry_after_secs: retry_after.map(|d| d.as_secs()),
-                primary: true,
+                retry_after_secs: retry_after.map(whole_secs),
+                limit: RateLimitKind::Primary,
             },
         )
     }
@@ -603,8 +621,8 @@ impl Fault {
             endpoint,
             FaultResponse::RateLimit {
                 status: 403,
-                retry_after_secs: retry_after.map(|d| d.as_secs()),
-                primary: false,
+                retry_after_secs: retry_after.map(whole_secs),
+                limit: RateLimitKind::Secondary,
             },
         )
     }
@@ -615,8 +633,8 @@ impl Fault {
             endpoint,
             FaultResponse::RateLimit {
                 status: 429,
-                retry_after_secs: retry_after.map(|d| d.as_secs()),
-                primary: false,
+                retry_after_secs: retry_after.map(whole_secs),
+                limit: RateLimitKind::Secondary,
             },
         )
     }
@@ -645,6 +663,12 @@ impl Fault {
         self.times = Some(n);
         self
     }
+}
+
+/// `Retry-After` carries whole seconds; round up so a short delay is not
+/// sent as 0.
+fn whole_secs(d: Duration) -> u64 {
+    d.as_secs() + u64::from(d.subsec_nanos() > 0)
 }
 
 /// A request the emulator served.
