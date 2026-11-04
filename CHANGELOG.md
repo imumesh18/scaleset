@@ -6,6 +6,55 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/imumesh18/scaleset/compare/v0.1.0...v0.2.0) - 2026-11-04
+
+### Changed
+
+- **Breaking:** `ClientBuilder::allow_http()` takes no argument. Plain HTTP
+  is opt-in, so call it only when you need it.
+- **Breaking:** `RunnerScaleSetSpec::disable_update()` takes no argument.
+  The new `enable_update()` turns runner updates back on.
+- **Breaking:** `JobCompleted::runner_id` and `runner_name` are `Option`s,
+  `None` when no runner took the job. The wire format is unchanged: the
+  service and the emulator still send `runnerId: 0` and `runnerName: ""`.
+- **Breaking:** `MessageSession::info()` returns `SessionInfo` instead of
+  `Arc<SessionInfo>`.
+- **Breaking:** in the `testing` emulator, `FaultResponse::RateLimit` has
+  `limit: RateLimitKind` instead of `primary: bool`. In the control API JSON
+  this is `"limit": "primary"` or `"limit": "secondary"`.
+- **Breaking:** in the `testing` emulator, `Fault`, `EmulatedJob`,
+  `EmulatedRunner`, `EmulatedSession`, `EmulatorState` and `JobState` are
+  `#[non_exhaustive]`.
+- **Breaking:** the minimum supported Rust version is 1.91.
+- The `Listener` adds up to 50% random jitter to its backoff, so standby
+  listeners do not retry in lockstep.
+- `JobTracker::busy_runners` yields runners in job request ID order.
+- Error messages keep at most 1 KiB of a non-JSON error body, such as an
+  HTML page from a proxy.
+- The log line for a rejected admin token shows the request path, never
+  the query.
+
+### Added
+
+- `JobTracker::forget_runner`, for a runner whose `JobCompleted` message
+  never arrived.
+- `FromStr` for the ID types (`ScaleSetId`, `RunnerId`, …).
+- `Label::with_type`, for labels whose type is not `System`.
+- `Scaler` for `&mut S`.
+- `PartialEq` and `Eq` for `ApiError` and `RateLimitError`; `Serialize` and
+  `Deserialize` for `RateLimitKind`.
+- `# Errors` and `# Panics` sections on every public call.
+
+### Fixed
+
+- A `null` count in a message's statistics, or a `null` message field, no
+  longer fails the whole message. Before, the message was never
+  acknowledged and kept coming back, and the `Listener` gave up after
+  `max_failures`. `null` now reads as 0 or empty, as in Go.
+- `examples/autoscaler.rs` no longer overflows on very large job counts,
+  and removes a runner's registration when the runner process fails to
+  start.
+
 ## [0.1.0](https://github.com/imumesh18/scaleset/releases/tag/v0.1.0)
 
 First release.
