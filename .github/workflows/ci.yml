@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: rustup toolchain install 1.88 --profile minimal && rustup default 1.88
+      - run: rustup toolchain install 1.91 --profile minimal && rustup default 1.91
       - run: cargo check --lib
       - run: cargo check --lib --features testing
 

@@ -71,6 +71,10 @@ pub(crate) enum CredentialsKind {
 
 impl Credentials {
     /// A personal access token.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::InvalidCredentials`] if `token` is blank.
     pub fn personal_access_token(token: impl Into<String>) -> Result<Self, Error> {
         let token = token.into();
         if token.trim().is_empty() {
@@ -87,6 +91,12 @@ impl Credentials {
     /// KEY` as downloaded from GitHub, or PKCS#8 `PRIVATE KEY`).
     ///
     /// `client_id` is the app's client ID; the numeric app ID also works.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::InvalidCredentials`] if `client_id` is blank,
+    /// `installation_id` is not positive, or the key is not an RSA private
+    /// key in PEM form.
     pub fn github_app(
         client_id: impl Into<String>,
         installation_id: i64,
@@ -98,6 +108,11 @@ impl Credentials {
 
     /// A GitHub App whose JWTs come from `provider`, for example a
     /// [`SignerJwtProvider`] backed by a KMS.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::InvalidCredentials`] if `installation_id` is
+    /// not positive.
     pub fn github_app_with_provider(
         installation_id: i64,
         provider: impl JwtProvider,
@@ -354,7 +369,7 @@ pub(crate) mod tests {
         let jwt = JwtProvider::token(&SignerJwtProvider::new("id", Fixed))
             .await
             .unwrap();
-        assert!(jwt.ends_with(".AQID"));
+        assert_eq!(jwt.rsplit('.').next(), Some("AQID"), "signature of {jwt}");
 
         assert!(
             JwtProvider::token(&SignerJwtProvider::new("", Fixed))

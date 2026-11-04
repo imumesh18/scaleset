@@ -4,7 +4,7 @@ use std::fmt;
 
 use jiff::Timestamp;
 use secrecy::SecretString;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident) => {
@@ -25,6 +25,14 @@ macro_rules! id_type {
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 fmt::Display::fmt(&self.0, f)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = std::num::ParseIntError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                s.parse().map(Self)
             }
         }
 
@@ -121,9 +129,14 @@ pub struct Label {
 impl Label {
     /// A label of type [`LABEL_TYPE_SYSTEM`].
     pub fn new(name: impl Into<String>) -> Self {
+        Self::with_type(name, LABEL_TYPE_SYSTEM)
+    }
+
+    /// A label of the given type.
+    pub fn with_type(name: impl Into<String>, label_type: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            label_type: LABEL_TYPE_SYSTEM.to_owned(),
+            label_type: label_type.into(),
         }
     }
 }
@@ -309,34 +322,49 @@ impl RunnerScaleSetSpec {
         self
     }
 
-    /// Sets whether runners may update themselves.
+    /// Stops runners from updating themselves.
     #[must_use]
-    pub fn disable_update(mut self, disable: bool) -> Self {
+    pub fn disable_update(mut self) -> Self {
         self.runner_setting = Some(RunnerSetting {
-            disable_update: disable,
+            disable_update: true,
         });
         self
     }
 
-    /// Fills in label types, and on create, the default label.
-    pub(crate) fn normalized(&self, creating: bool) -> Result<Self, String> {
-        let mut spec = self.clone();
-        if creating {
-            let name = match spec.name.as_deref() {
-                Some(name) if !name.trim().is_empty() => name.to_owned(),
-                _ => return Err("runner scale set name is required".into()),
-            };
-            if spec.labels.is_empty() {
-                spec.labels.push(Label::new(name));
-            }
-            spec.runner_setting.get_or_insert_default();
+    /// Lets runners update themselves. This is the default on create; on
+    /// update it turns updates back on.
+    #[must_use]
+    pub fn enable_update(mut self) -> Self {
+        self.runner_setting = Some(RunnerSetting {
+            disable_update: false,
+        });
+        self
+    }
+
+    /// The spec as sent on create: a name is required, and it becomes the
+    /// only label when there are none.
+    pub(crate) fn for_create(&self) -> Result<Self, String> {
+        let name = match self.name.as_deref() {
+            Some(name) if !name.trim().is_empty() => name,
+            _ => return Err("runner scale set name is required".into()),
+        };
+        let mut spec = self.for_update();
+        if spec.labels.is_empty() {
+            spec.labels.push(Label::new(name));
         }
+        spec.runner_setting.get_or_insert_default();
+        Ok(spec)
+    }
+
+    /// The spec as sent on update: labels without a type get type `System`.
+    pub(crate) fn for_update(&self) -> Self {
+        let mut spec = self.clone();
         for label in &mut spec.labels {
             if label.label_type.is_empty() {
                 LABEL_TYPE_SYSTEM.clone_into(&mut label.label_type);
             }
         }
-        Ok(spec)
+        spec
     }
 }
 
@@ -594,12 +622,20 @@ pub struct JobCompleted {
     /// Result, such as `succeeded`, `failed` or `canceled`.
     #[serde(default)]
     pub result: String,
-    /// The runner's ID.
-    #[serde(default)]
-    pub runner_id: RunnerId,
-    /// The runner's name.
-    #[serde(default)]
-    pub runner_name: String,
+    /// The runner's ID, or `None` if no runner took the job.
+    #[serde(
+        default,
+        deserialize_with = "optional_id",
+        serialize_with = "id_or_zero"
+    )]
+    pub runner_id: Option<RunnerId>,
+    /// The runner's name, or `None` if no runner took the job.
+    #[serde(
+        default,
+        deserialize_with = "optional_name",
+        serialize_with = "name_or_empty"
+    )]
+    pub runner_name: Option<String>,
     /// Job details.
     #[serde(flatten)]
     pub job: JobInfo,
@@ -609,11 +645,11 @@ pub struct JobCompleted {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawMessage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub message_id: MessageId,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub message_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub body: String,
     #[serde(default)]
     pub statistics: Option<ScaleSetStatistics>,
@@ -625,7 +661,7 @@ impl ScaleSetMessage {
     /// Decodes a queue message. Anything it cannot read becomes a message
     /// with no jobs, so it can still be acknowledged and its statistics
     /// used. Failing instead would redeliver the same message forever.
-    pub(crate) fn from_raw(raw: RawMessage) -> Self {
+    pub(crate) fn from_raw(raw: &RawMessage) -> Self {
         let id = raw.message_id;
         let entries: Vec<serde_json::Value> = if raw.message_type != MESSAGE_TYPE_JOB_MESSAGES {
             tracing::warn!(message_id = %id, message_type = %raw.message_type, "skipping a message of an unknown type");
@@ -674,14 +710,53 @@ where
     Ok(value.filter(|t| t.as_second() > GO_ZERO_TIME_SECS))
 }
 
-/// Deserializes a count, reading a negative or oversized value as the
-/// nearest `u32` rather than failing the whole message.
+/// Deserializes a count, reading `null` as 0 and a negative or oversized
+/// value as the nearest `u32`, rather than failing the whole message.
 fn count<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value = i64::deserialize(deserializer)?;
+    let value = Option::<i64>::deserialize(deserializer)?.unwrap_or(0);
     Ok(u32::try_from(value.max(0)).unwrap_or(u32::MAX))
+}
+
+/// Deserializes a runner ID, mapping Go's zero value to `None`.
+fn optional_id<'de, D>(deserializer: D) -> Result<Option<RunnerId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<RunnerId>::deserialize(deserializer)?;
+    Ok(value.filter(|id| id.0 != 0))
+}
+
+/// Deserializes a runner name, mapping Go's zero value to `None`.
+fn optional_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|name| !name.is_empty()))
+}
+
+/// Serializes a missing runner ID as Go's zero value, as the service does.
+#[expect(clippy::ref_option, reason = "serde passes fields by reference")]
+fn id_or_zero<S: Serializer>(id: &Option<RunnerId>, serializer: S) -> Result<S::Ok, S::Error> {
+    id.unwrap_or_default().serialize(serializer)
+}
+
+/// Serializes a missing runner name as Go's zero value, as the service does.
+#[expect(clippy::ref_option, reason = "serde passes fields by reference")]
+fn name_or_empty<S: Serializer>(name: &Option<String>, serializer: S) -> Result<S::Ok, S::Error> {
+    name.as_deref().unwrap_or_default().serialize(serializer)
+}
+
+/// Deserializes `null` as the default value, as Go does.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// `0001-01-01T00:00:00Z` as a Unix timestamp.
@@ -698,7 +773,8 @@ mod tests {
              "queueTime": "2024-01-01T00:00:00Z", "finishTime": "0001-01-01T00:00:00Z"},
             {"messageType": "JobStarted", "runnerRequestId": 2, "runnerId": 7, "runnerName": "r"},
             {"messageType": "SomethingNew", "x": 1},
-            {"messageType": "JobCompleted", "runnerRequestId": 3, "result": "canceled"},
+            {"messageType": "JobCompleted", "runnerRequestId": 3, "result": "canceled",
+             "runnerId": 0, "runnerName": ""},
             {"messageType": "JobAssigned", "runnerRequestId": 4, "requestLabels": ["a"]},
         ]);
         let raw = RawMessage {
@@ -710,7 +786,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let msg = ScaleSetMessage::from_raw(raw);
+        let msg = ScaleSetMessage::from_raw(&raw);
         assert_eq!(msg.id, MessageId(5));
         assert_eq!(msg.jobs.len(), 5);
         assert!(matches!(msg.jobs[2], JobMessage::Unknown));
@@ -723,7 +799,12 @@ mod tests {
 
         let started: Vec<_> = msg.jobs_started().collect();
         assert_eq!(started[0].runner_id, RunnerId(7));
-        assert_eq!(msg.jobs_completed().next().unwrap().result, "canceled");
+        let completed = msg.jobs_completed().next().unwrap();
+        assert_eq!(completed.result, "canceled");
+        assert_eq!(
+            (completed.runner_id, completed.runner_name.as_deref()),
+            (None, None)
+        );
         assert_eq!(
             msg.jobs_assigned().next().unwrap().job.request_labels,
             vec!["a"]
@@ -742,7 +823,7 @@ mod tests {
             body: body.to_string(),
             statistics: None,
         };
-        let msg = ScaleSetMessage::from_raw(raw);
+        let msg = ScaleSetMessage::from_raw(&raw);
         assert!(matches!(msg.jobs[0], JobMessage::Unknown));
         assert_eq!(msg.jobs_assigned().count(), 1);
     }
@@ -756,7 +837,7 @@ mod tests {
                 body: body.into(),
                 statistics: Some(ScaleSetStatistics::default()),
             };
-            let msg = ScaleSetMessage::from_raw(raw);
+            let msg = ScaleSetMessage::from_raw(&raw);
             assert_eq!(msg.id, MessageId(9));
             assert!(msg.jobs.is_empty());
             assert!(msg.statistics.is_some());
@@ -765,7 +846,7 @@ mod tests {
 
     #[test]
     fn spec_defaults_label_to_name() {
-        let spec = RunnerScaleSetSpec::new("set").normalized(true).unwrap();
+        let spec = RunnerScaleSetSpec::new("set").for_create().unwrap();
         assert_eq!(spec.labels, vec![Label::new("set")]);
 
         let spec = RunnerScaleSetSpec::default()
@@ -773,16 +854,15 @@ mod tests {
                 name: "x".into(),
                 label_type: String::new(),
             })
-            .normalized(false)
-            .unwrap();
+            .for_update();
         assert_eq!(spec.labels[0].label_type, LABEL_TYPE_SYSTEM);
 
-        assert!(RunnerScaleSetSpec::default().normalized(true).is_err());
+        assert!(RunnerScaleSetSpec::default().for_create().is_err());
         // A name is required on create even with labels.
         assert!(
             RunnerScaleSetSpec::default()
                 .label(Label::new("x"))
-                .normalized(true)
+                .for_create()
                 .is_err()
         );
     }
@@ -791,7 +871,7 @@ mod tests {
     fn spec_serialization() {
         let spec = RunnerScaleSetSpec::new("set")
             .runner_group_id(RunnerGroupId(3))
-            .normalized(true)
+            .for_create()
             .unwrap();
         assert_eq!(
             serde_json::to_value(&spec).unwrap(),
@@ -806,17 +886,14 @@ mod tests {
 
     #[test]
     fn update_sends_only_what_was_set() {
-        let unchanged = RunnerScaleSetSpec::default().normalized(false).unwrap();
+        let unchanged = RunnerScaleSetSpec::default().for_update();
         assert_eq!(
             serde_json::to_value(&unchanged).unwrap(),
             serde_json::json!({})
         );
 
         // An explicit `false` is sent, so updates can be turned back on.
-        let enable = RunnerScaleSetSpec::default()
-            .disable_update(false)
-            .normalized(false)
-            .unwrap();
+        let enable = RunnerScaleSetSpec::default().enable_update().for_update();
         assert_eq!(
             serde_json::to_value(&enable).unwrap(),
             serde_json::json!({"RunnerSetting": {"disableUpdate": false}})
@@ -849,5 +926,39 @@ mod tests {
                 .unwrap();
         assert_eq!(stats.total_assigned_jobs, 0);
         assert_eq!(stats.total_running_jobs, u32::MAX);
+    }
+    #[test]
+    fn job_without_runner_uses_go_zero_values() {
+        let job = JobCompleted {
+            result: "canceled".into(),
+            ..JobCompleted::default()
+        };
+        let wire = serde_json::to_value(&job).unwrap();
+        assert_eq!(wire["runnerId"], 0, "{wire}");
+        assert_eq!(wire["runnerName"], "", "{wire}");
+        assert_eq!(serde_json::from_value::<JobCompleted>(wire).unwrap(), job);
+    }
+
+    #[test]
+    fn ids_parse_from_text() {
+        assert_eq!("42".parse::<RunnerId>(), Ok(RunnerId(42)));
+        assert!("x".parse::<ScaleSetId>().is_err());
+    }
+
+    #[test]
+    fn nulls_read_as_empty() {
+        let stats: ScaleSetStatistics =
+            serde_json::from_str(r#"{"totalAssignedJobs": null, "totalRunningJobs": 2}"#).unwrap();
+        assert_eq!(stats.total_assigned_jobs, 0);
+        assert_eq!(stats.total_running_jobs, 2);
+
+        let raw: RawMessage = serde_json::from_str(
+            r#"{"messageId": 3, "messageType": null, "body": null, "statistics": {"totalAssignedJobs": null}}"#,
+        )
+        .unwrap();
+        let msg = ScaleSetMessage::from_raw(&raw);
+        assert_eq!(msg.id, MessageId(3));
+        assert!(msg.jobs.is_empty());
+        assert_eq!(msg.statistics, Some(ScaleSetStatistics::default()));
     }
 }

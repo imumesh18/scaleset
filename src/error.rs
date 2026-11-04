@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use reqwest::{Method, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A boxed error, as returned by user-supplied hooks such as a
 /// [`JwtProvider`](crate::JwtProvider).
@@ -241,7 +241,7 @@ pub struct ActionsException {
 }
 
 /// An unsuccessful response from GitHub or the Actions service.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ApiError {
     /// Request method.
@@ -291,7 +291,8 @@ impl fmt::Display for ApiError {
 impl std::error::Error for ApiError {}
 
 /// Which rate limit rejected a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum RateLimitKind {
     /// The primary quota is spent (`X-RateLimit-Remaining: 0`, no
@@ -316,7 +317,7 @@ impl fmt::Display for RateLimitKind {
 /// When requeuing rate-limited work, wait for
 /// [`retry_after`](Self::retry_after) and fall back to a positive delay (for
 /// example one minute) when it is `None`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RateLimitError {
     /// Which limit was hit.

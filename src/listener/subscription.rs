@@ -47,7 +47,7 @@ pub struct Subscription {
 
 impl Subscription {
     pub(crate) fn new(session: MessageSession, max_runners: MaxRunners) -> Self {
-        let statistics = session.info().statistics.unwrap_or_default();
+        let statistics = session.current().statistics.unwrap_or_default();
         Self {
             session,
             max_runners,
@@ -78,6 +78,11 @@ impl Subscription {
     /// [`Event::Idle`].
     ///
     /// Cancel safe: dropping the future loses nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the poll fails; see
+    /// [`MessageSession::get_message`]. The next call polls again.
     pub async fn next(&mut self) -> Result<Event<'_>> {
         if !self.started {
             self.started = true;
@@ -118,7 +123,10 @@ impl Subscription {
     /// Acknowledges the message from the last [`next`](Self::next), so it is
     /// not delivered again. Does nothing after other events.
     ///
-    /// If the acknowledgment fails, the message stays unacknowledged.
+    /// # Errors
+    ///
+    /// Fails if the acknowledgment fails. The message then stays
+    /// unacknowledged, and a later `ack` can try again.
     pub async fn ack(&mut self) -> Result<()> {
         let Some(id) = self.current.as_ref().map(|m| m.id) else {
             return Ok(());

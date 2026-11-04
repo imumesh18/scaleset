@@ -217,7 +217,7 @@ anything; removing them could not be.
 The Go client sends tokens to whatever URL it is given or handed back. Here
 the config URL, the Actions service URL from the token exchange, and the
 message queue URL must all be HTTPS, or the call fails with
-`Error::InsecureUrl`. `ClientBuilder::allow_http(true)` relaxes this for GHES
+`Error::InsecureUrl`. `ClientBuilder::allow_http()` relaxes this for GHES
 labs and tests (the emulator uses it); github.com and GHE.com never allow it.
 
 ### Transport belongs to the caller
@@ -273,12 +273,18 @@ small internal object-safe wrapper, so users never need `async_trait` or
   `jobs_started()`… iterators for the per-type view. Unknown message types
   become `JobMessage::Unknown` instead of being dropped silently.
 * **Times** are `Option<jiff::Timestamp>`; Go's zero time
-  (`0001-01-01T00:00:00Z`) maps to `None`.
+  (`0001-01-01T00:00:00Z`) maps to `None`. Likewise `JobCompleted`'s
+  `runner_id` and `runner_name` are `None`, not `0` and `""`, when no runner
+  took the job.
 * **Secrets** (`JitRunnerConfig::encoded_jit_config`, the session queue
   token, the PAT) are `secrecy::SecretString`: redacted in `Debug`, wiped on
   drop, never serialized, and read only through `expose_secret()`.
 * **Counts** in statistics are `u32`; a negative or oversized value from the
-  service is clamped rather than failing the whole message.
+  service is clamped, and `null` read as 0, rather than failing the whole
+  message. Message fields that are `null` read as empty, as in Go.
+* **No `bool` parameters**: `ClientBuilder::allow_http()` takes none (HTTP
+  is opt-in), and `RunnerScaleSetSpec` has `disable_update()` and
+  `enable_update()`, since an explicit `false` turns updates back on.
 
 ### Listener
 
@@ -340,7 +346,8 @@ What it does, and how that differs from Go:
   Kubernetes controller).
 * **`JobTracker`** follows jobs by request ID through assignment, start and
   completion, to tell busy runners from idle ones (what ARC uses `JobStarted`
-  for) without double counting reassigned jobs.
+  for) without double counting reassigned jobs. `forget_runner` drops a
+  runner whose completion never arrived, so it does not stay busy forever.
 * **`Subscription`** is the pull API underneath: `next()` yields events,
   `ack()` acknowledges, and calling `next()` without `ack()` gives the
   message back. It borrows mutably, so a message can't be held across polls.

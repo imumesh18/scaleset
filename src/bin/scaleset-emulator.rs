@@ -21,6 +21,12 @@
 //! | `POST /_emulator/expire/session/{scaleSetId}` | drop a session, as if it timed out |
 //! | `POST /_emulator/reset` | clear everything |
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "a command-line tool reports to its terminal"
+)]
+
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -97,12 +103,12 @@ fn parse(
             "--host" => {
                 host = value
                     .parse()
-                    .map_err(|_| format!("invalid host: {value}"))?
+                    .map_err(|_| format!("invalid host: {value}"))?;
             }
             "--port" => {
                 port = value
                     .parse()
-                    .map_err(|_| format!("invalid port: {value}"))?
+                    .map_err(|_| format!("invalid port: {value}"))?;
             }
             "--pat" => builder = builder.pat(value),
             "--app-installation-id" => {
@@ -114,7 +120,7 @@ fn parse(
             }
             "--long-poll-ms" => builder = builder.long_poll(Duration::from_millis(number(&value)?)),
             "--auto-run-ms" => {
-                builder = builder.auto_run_jobs(Duration::from_millis(number(&value)?))
+                builder = builder.auto_run_jobs(Duration::from_millis(number(&value)?));
             }
             "--admin-token-ttl-secs" => {
                 builder = builder.admin_token_ttl(Duration::from_secs(number(&value)?));

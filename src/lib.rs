@@ -45,10 +45,12 @@
 //!         // Runners are ephemeral: each one leaves when its job completes.
 //!         if let Some(message) = event.message() {
 //!             for job in message.jobs_completed() {
-//!                 self.runners.remove(&job.runner_name);
+//!                 if let Some(name) = &job.runner_name {
+//!                     self.runners.remove(name);
+//!                 }
 //!             }
 //!         }
-//!         let wanted = event.statistics().total_assigned_jobs as usize;
+//!         let wanted = usize::try_from(event.statistics().total_assigned_jobs)?;
 //!         while self.runners.len() < wanted {
 //!             let setting = JitRunnerSetting::unique("runner");
 //!             let jit = self.client.generate_jit_config(self.scale_set_id, &setting).await?;
@@ -117,11 +119,10 @@
 //!
 //! * `rustls` (default): TLS through rustls.
 //! * `native-tls`: TLS through the platform's library.
-//!
-//! Enable one of the two; without TLS the client cannot connect.
 //! * `testing`: [`testing::Emulator`] and the `scaleset-emulator` binary.
+//!
+//! Enable `rustls` or `native-tls`; without TLS the client cannot connect.
 
-#![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod auth;
@@ -146,7 +147,13 @@ pub use error::{
 };
 pub use retry::{RateLimitPolicy, RateLimitRule, RetryPolicy};
 pub use session::MessageSession;
-pub use types::*;
+pub use types::{
+    DEFAULT_RUNNER_GROUP, JitRunnerConfig, JitRunnerSetting, JobAssigned, JobAvailable,
+    JobCompleted, JobInfo, JobMessage, JobRequestId, JobStarted, LABEL_TYPE_SYSTEM, Label,
+    MessageId, RunnerGroup, RunnerGroupId, RunnerId, RunnerReference, RunnerScaleSet,
+    RunnerScaleSetSpec, RunnerSetting, ScaleSetId, ScaleSetMessage, ScaleSetStatistics, SessionId,
+    SessionInfo,
+};
 
 /// Re-exported so callers can build an HTTP client without adding the
 /// dependency themselves.
@@ -154,6 +161,20 @@ pub use reqwest;
 /// Re-exported for [`SecretString`] fields such as
 /// [`JitRunnerConfig::encoded_jit_config`].
 pub use secrecy::{self, ExposeSecret, SecretString};
+
+// The client, its sessions and the listener are shared across tasks.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Client>();
+    assert_send_sync::<MessageSession>();
+    assert_send_sync::<Credentials>();
+    assert_send_sync::<Error>();
+    assert_send_sync::<RetryPolicy>();
+    assert_send_sync::<listener::Listener>();
+    assert_send_sync::<listener::JobTracker>();
+    assert_send_sync::<listener::MaxRunners>();
+    assert_send_sync::<listener::Error>();
+};
 
 /// Compiles the README's examples as doctests.
 #[cfg(doctest)]

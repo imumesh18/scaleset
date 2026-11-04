@@ -25,6 +25,7 @@ pub(crate) const MAX_BATCH: usize = 50;
 /// Where a job is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum JobState {
     /// Queued; a `JobAvailable` message was sent. Waiting to be acquired.
     Available,
@@ -39,6 +40,7 @@ pub enum JobState {
 /// A job in the emulator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct EmulatedJob {
     /// The job request ID.
     pub id: JobRequestId,
@@ -57,6 +59,7 @@ pub struct EmulatedJob {
 /// A runner registered through a JIT config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct EmulatedRunner {
     /// Runner ID.
     pub id: RunnerId,
@@ -71,6 +74,7 @@ pub struct EmulatedRunner {
 /// An open message session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct EmulatedSession {
     /// Session ID.
     pub session_id: SessionId,
@@ -83,6 +87,7 @@ pub struct EmulatedSession {
 /// A point-in-time copy of the emulator's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct EmulatorState {
     /// Scale sets, with current statistics.
     pub scale_sets: Vec<RunnerScaleSet>,
@@ -131,7 +136,7 @@ pub(crate) struct ServiceError {
 }
 
 impl ServiceError {
-    pub fn new(status: u16, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: u16, message: impl Into<String>) -> Self {
         Self {
             status,
             type_name: None,
@@ -139,7 +144,11 @@ impl ServiceError {
         }
     }
 
-    pub fn exception(status: u16, type_name: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn exception(
+        status: u16,
+        type_name: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             status,
             type_name: Some(type_name),
@@ -147,11 +156,11 @@ impl ServiceError {
         }
     }
 
-    pub fn unauthorized() -> Self {
+    pub(crate) fn unauthorized() -> Self {
         Self::new(401, "Bad credentials")
     }
 
-    pub fn not_found(what: &str) -> Self {
+    pub(crate) fn not_found(what: &str) -> Self {
         Self::new(404, format!("{what} not found"))
     }
 }
@@ -200,7 +209,7 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub fn new(config: EmulatorConfig, base_url: String) -> Self {
+    pub(crate) fn new(config: EmulatorConfig, base_url: String) -> Self {
         let mut groups = vec![RunnerGroup {
             id: RunnerGroupId::DEFAULT,
             name: "Default".into(),
@@ -243,7 +252,7 @@ impl State {
     // Authentication
 
     /// Exchanges an app JWT for an installation token.
-    pub fn installation_token(
+    pub(crate) fn installation_token(
         &mut self,
         installation_id: i64,
         bearer: Option<&str>,
@@ -267,7 +276,7 @@ impl State {
     }
 
     /// Issues a runner registration token for a PAT or installation token.
-    pub fn registration_token(&mut self, bearer: Option<&str>) -> ServiceResult<String> {
+    pub(crate) fn registration_token(&mut self, bearer: Option<&str>) -> ServiceResult<String> {
         let bearer = bearer.ok_or_else(ServiceError::unauthorized)?;
         if bearer != self.config.pat && !self.installation_tokens.contains(bearer) {
             return Err(ServiceError::unauthorized());
@@ -279,7 +288,7 @@ impl State {
 
     /// Exchanges a registration token for the Actions service URL and an
     /// admin token.
-    pub fn admin_connection(
+    pub(crate) fn admin_connection(
         &mut self,
         remote_auth: Option<&str>,
     ) -> ServiceResult<(String, String)> {
@@ -303,7 +312,7 @@ impl State {
     }
 
     /// Checks an admin token.
-    pub fn check_admin(&self, bearer: Option<&str>) -> ServiceResult<()> {
+    pub(crate) fn check_admin(&self, bearer: Option<&str>) -> ServiceResult<()> {
         match bearer.and_then(|b| self.admin_tokens.get(b)) {
             Some(exp) if *exp > SystemTime::now() => Ok(()),
             _ => Err(ServiceError::unauthorized()),
@@ -311,14 +320,14 @@ impl State {
     }
 
     /// Revokes every admin token.
-    pub fn expire_admin_tokens(&mut self) {
+    pub(crate) fn expire_admin_tokens(&mut self) {
         self.admin_tokens.clear();
     }
 
     // ---------------------------------------------------------------------
     // Runner groups and scale sets
 
-    pub fn runner_groups(&self, name: Option<&str>) -> Vec<RunnerGroup> {
+    pub(crate) fn runner_groups(&self, name: Option<&str>) -> Vec<RunnerGroup> {
         self.groups
             .iter()
             .filter(|g| name.is_none_or(|n| g.name.eq_ignore_ascii_case(n)))
@@ -367,7 +376,7 @@ impl State {
         set
     }
 
-    pub fn scale_sets(
+    pub(crate) fn scale_sets(
         &self,
         group: Option<RunnerGroupId>,
         name: Option<&str>,
@@ -380,14 +389,14 @@ impl State {
             .collect()
     }
 
-    pub fn scale_set(&self, id: ScaleSetId) -> ServiceResult<RunnerScaleSet> {
+    pub(crate) fn scale_set(&self, id: ScaleSetId) -> ServiceResult<RunnerScaleSet> {
         self.scale_sets
             .get(&id)
             .map(|e| self.with_statistics(&e.set))
             .ok_or_else(|| ServiceError::not_found("runner scale set"))
     }
 
-    pub fn create_scale_set(&mut self, spec: ScaleSetBody) -> ServiceResult<RunnerScaleSet> {
+    pub(crate) fn create_scale_set(&mut self, spec: ScaleSetBody) -> ServiceResult<RunnerScaleSet> {
         let name = spec
             .name
             .filter(|n| !n.is_empty())
@@ -441,7 +450,7 @@ impl State {
         Ok(self.with_statistics(&set))
     }
 
-    pub fn update_scale_set(
+    pub(crate) fn update_scale_set(
         &mut self,
         id: ScaleSetId,
         spec: ScaleSetBody,
@@ -493,7 +502,7 @@ impl State {
         Ok(self.with_statistics(&set))
     }
 
-    pub fn delete_scale_set(&mut self, id: ScaleSetId) -> ServiceResult<()> {
+    pub(crate) fn delete_scale_set(&mut self, id: ScaleSetId) -> ServiceResult<()> {
         self.scale_sets
             .remove(&id)
             .ok_or_else(|| ServiceError::not_found("runner scale set"))?;
@@ -511,7 +520,7 @@ impl State {
     // ---------------------------------------------------------------------
     // Runners
 
-    pub fn generate_jit_config(
+    pub(crate) fn generate_jit_config(
         &mut self,
         scale_set_id: ScaleSetId,
         name: &str,
@@ -554,14 +563,14 @@ impl State {
         Ok((reference, config))
     }
 
-    pub fn runner(&self, id: RunnerId) -> ServiceResult<RunnerReference> {
+    pub(crate) fn runner(&self, id: RunnerId) -> ServiceResult<RunnerReference> {
         self.runners
             .get(&id)
             .map(reference)
             .ok_or_else(runner_not_found)
     }
 
-    pub fn runners_named(&self, name: &str) -> Vec<RunnerReference> {
+    pub(crate) fn runners_named(&self, name: &str) -> Vec<RunnerReference> {
         self.runners
             .values()
             .filter(|r| r.name == name)
@@ -569,7 +578,7 @@ impl State {
             .collect()
     }
 
-    pub fn remove_runner(&mut self, id: RunnerId) -> ServiceResult<()> {
+    pub(crate) fn remove_runner(&mut self, id: RunnerId) -> ServiceResult<()> {
         let runner = self.runners.get(&id).ok_or_else(runner_not_found)?;
         if runner.job.is_some() {
             return Err(ServiceError::exception(
@@ -585,7 +594,7 @@ impl State {
     // ---------------------------------------------------------------------
     // Sessions and the message queue
 
-    pub fn create_session(
+    pub(crate) fn create_session(
         &mut self,
         scale_set_id: ScaleSetId,
         owner: String,
@@ -632,7 +641,7 @@ impl State {
             .ok_or_else(|| ServiceError::not_found("session"))
     }
 
-    pub fn refresh_session(
+    pub(crate) fn refresh_session(
         &mut self,
         scale_set_id: ScaleSetId,
         session_id: &SessionId,
@@ -645,7 +654,7 @@ impl State {
         Ok(session.info.clone())
     }
 
-    pub fn delete_session(
+    pub(crate) fn delete_session(
         &mut self,
         scale_set_id: ScaleSetId,
         session_id: &SessionId,
@@ -656,7 +665,7 @@ impl State {
     }
 
     /// Drops a scale set's session, as if it timed out on the service.
-    pub fn expire_session(&mut self, scale_set_id: ScaleSetId) -> bool {
+    pub(crate) fn expire_session(&mut self, scale_set_id: ScaleSetId) -> bool {
         self.scale_sets
             .get_mut(&scale_set_id)
             .and_then(|e| e.session.take())
@@ -665,7 +674,7 @@ impl State {
 
     /// Makes the queue token of a scale set's session stop working, as if
     /// it expired.
-    pub fn expire_queue_token(&mut self, scale_set_id: ScaleSetId) -> bool {
+    pub(crate) fn expire_queue_token(&mut self, scale_set_id: ScaleSetId) -> bool {
         match self
             .scale_sets
             .get_mut(&scale_set_id)
@@ -680,7 +689,7 @@ impl State {
     }
 
     /// Checks a queue token against the scale set's session.
-    pub fn check_queue(
+    pub(crate) fn check_queue(
         &self,
         scale_set_id: ScaleSetId,
         session_id: Option<&SessionId>,
@@ -703,7 +712,7 @@ impl State {
 
     /// The next message for a poll: an unacknowledged batch newer than
     /// `last`, or a new batch of pending job messages.
-    pub fn next_message(
+    pub(crate) fn next_message(
         &mut self,
         scale_set_id: ScaleSetId,
         last: i64,
@@ -724,7 +733,7 @@ impl State {
         Ok(Some((id, jobs, stats)))
     }
 
-    pub fn ack(&mut self, scale_set_id: ScaleSetId, message_id: i64) -> ServiceResult<()> {
+    pub(crate) fn ack(&mut self, scale_set_id: ScaleSetId, message_id: i64) -> ServiceResult<()> {
         self.entry(scale_set_id)?.queue.unacked.remove(&message_id);
         Ok(())
     }
@@ -739,7 +748,7 @@ impl State {
     // Jobs
 
     /// Queues a job and announces it with `JobAvailable`.
-    pub fn queue_job(
+    pub(crate) fn queue_job(
         &mut self,
         scale_set_id: ScaleSetId,
         labels: Vec<String>,
@@ -793,7 +802,7 @@ impl State {
     }
 
     /// Acquires available jobs and assigns them to the scale set at once.
-    pub fn acquire_jobs(
+    pub(crate) fn acquire_jobs(
         &mut self,
         scale_set_id: ScaleSetId,
         ids: &[JobRequestId],
@@ -827,7 +836,7 @@ impl State {
 
     /// Starts an assigned job on a runner: the named one, or any idle
     /// runner of the scale set.
-    pub fn start_job(
+    pub(crate) fn start_job(
         &mut self,
         id: JobRequestId,
         runner_name: Option<&str>,
@@ -875,7 +884,11 @@ impl State {
 
     /// Completes a job. A running job's runner is removed, as ephemeral
     /// runners exit after one job. A job that has not started is canceled.
-    pub fn complete_job(&mut self, id: JobRequestId, result: Option<&str>) -> ServiceResult<()> {
+    pub(crate) fn complete_job(
+        &mut self,
+        id: JobRequestId,
+        result: Option<&str>,
+    ) -> ServiceResult<()> {
         let job = self
             .jobs
             .get_mut(&id)
@@ -894,10 +907,8 @@ impl State {
         let scale_set_id = job.public.scale_set_id;
         let runner_id = job.public.runner_id;
 
-        let (runner_id, runner_name) = match runner_id.and_then(|r| self.runners.remove(&r)) {
-            Some(r) => (r.id, r.name),
-            None => (RunnerId::default(), String::new()),
-        };
+        let runner = runner_id.and_then(|r| self.runners.remove(&r));
+        let (runner_id, runner_name) = (runner.as_ref().map(|r| r.id), runner.map(|r| r.name));
         self.push(
             scale_set_id,
             JobMessage::Completed(JobCompleted {
@@ -912,7 +923,7 @@ impl State {
 
     /// Starts assigned jobs on idle runners, oldest first. Returns the jobs
     /// started.
-    pub fn match_jobs(&mut self) -> Vec<JobRequestId> {
+    pub(crate) fn match_jobs(&mut self) -> Vec<JobRequestId> {
         let assigned: Vec<JobRequestId> = self
             .jobs
             .values()
@@ -925,7 +936,7 @@ impl State {
             .collect()
     }
 
-    pub fn snapshot(&self) -> EmulatorState {
+    pub(crate) fn snapshot(&self) -> EmulatorState {
         EmulatorState {
             scale_sets: self.scale_sets(None, None),
             sessions: self
